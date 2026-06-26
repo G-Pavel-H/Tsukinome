@@ -1,0 +1,96 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { InMemoryStore } from '../../src/store/memory-store.js';
+import { RunState, type RunKey } from '../../src/store/types.js';
+
+const payload = {
+  installationId: 1,
+  owner: 'acme',
+  repo: 'widgets',
+  issueNumber: 42,
+  deliveryId: 'delivery-1',
+};
+
+const key: RunKey = {
+  installationId: 1,
+  owner: 'acme',
+  repo: 'widgets',
+  issueNumber: 42,
+};
+
+describe('InMemoryStore — job queue', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('enqueues then claims a job, marking it in_progress', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    expect(job.status).toBe('queued');
+
+    const claimed = await store.claimNextJob();
+    expect(claimed).not.toBeNull();
+    expect(claimed!.id).toBe(job.id);
+    expect(claimed!.status).toBe('in_progress');
+    expect(claimed!.payload).toEqual(payload);
+  });
+
+  it('claims jobs FIFO and returns null when the queue is empty', async () => {
+    const a = await store.enqueueJob({ type: 'issue_opened', payload });
+    const b = await store.enqueueJob({ type: 'issue_opened', payload });
+
+    expect((await store.claimNextJob())!.id).toBe(a.id);
+    expect((await store.claimNextJob())!.id).toBe(b.id);
+    expect(await store.claimNextJob()).toBeNull();
+  });
+
+  it('does not re-claim a job that is done', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    await store.claimNextJob();
+    await store.markJobDone(job.id);
+    expect(await store.claimNextJob()).toBeNull();
+  });
+
+  it('marks a job failed with an error and does not re-claim it', async () => {
+    const job = await store.enqueueJob({ type: 'issue_opened', payload });
+    await store.claimNextJob();
+    await store.markJobFailed(job.id, 'boom');
+    expect(await store.claimNextJob()).toBeNull();
+  });
+});
+
+describe('InMemoryStore — runs', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('creates a run on first findOrCreateRun and returns it thereafter', async () => {
+    const first = await store.findOrCreateRun(key, RunState.Received);
+    expect(first.created).toBe(true);
+    expect(first.run.state).toBe(RunState.Received);
+
+    const second = await store.findOrCreateRun(key, RunState.Received);
+    expect(second.created).toBe(false);
+    expect(second.run.id).toBe(first.run.id);
+  });
+
+  it('updates run state', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    await store.updateRunState(run.id, RunState.Acknowledged);
+    const fetched = await store.getRun(key);
+    expect(fetched!.state).toBe(RunState.Acknowledged);
+  });
+});
+
+describe('InMemoryStore — processed events', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('marks a delivery once and reports duplicates', async () => {
+    expect(await store.tryMarkEventProcessed('d-1')).toBe(true);
+    expect(await store.tryMarkEventProcessed('d-1')).toBe(false);
+    expect(await store.tryMarkEventProcessed('d-2')).toBe(true);
+  });
+});

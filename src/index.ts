@@ -1,11 +1,18 @@
 import 'dotenv/config';
 import { createProbot, createNodeMiddleware } from 'probot';
 import { createServer } from './server.js';
-import { app } from './app.js';
+import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+import { createPool } from './db/pool.js';
+import { PgStore } from './store/pg-store.js';
+import { createProbotGitHubClient } from './github/client.js';
+import { startWorker } from './worker/worker.js';
 
 async function main() {
   const config = loadConfig();
+
+  const pool = createPool(config.databaseUrl);
+  const store = new PgStore(pool);
 
   const probot = createProbot({
     overrides: {
@@ -15,6 +22,9 @@ async function main() {
       logLevel: 'info',
     },
   });
+
+  const github = createProbotGitHubClient(probot);
+  const app = createApp({ store, log: probot.log });
 
   const webhookMiddleware = await createNodeMiddleware(app, {
     probot,
@@ -28,6 +38,18 @@ async function main() {
     console.log(`Health check: http://localhost:${config.port}/health`);
     console.log(`Webhooks:     http://localhost:${config.port}/api/github/webhooks`);
   });
+
+  const worker = startWorker({ store, github, log: probot.log });
+
+  const shutdown = (signal: string) => {
+    console.log(`Received ${signal}, shutting down...`);
+    worker.stop();
+    server.close(() => {
+      void pool.end().finally(() => process.exit(0));
+    });
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 main().catch((err) => {

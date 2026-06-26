@@ -1,0 +1,117 @@
+import type { Pool, QueryResultRow } from 'pg';
+import type {
+  FindOrCreateRunResult,
+  Job,
+  JobPayload,
+  JobType,
+  Run,
+  RunKey,
+  RunState,
+  Store,
+} from './types.js';
+
+function mapJob(row: QueryResultRow): Job {
+  return {
+    id: Number(row.id),
+    type: row.type as JobType,
+    payload: row.payload as JobPayload,
+    status: row.status,
+    attempts: Number(row.attempts),
+  };
+}
+
+function mapRun(row: QueryResultRow): Run {
+  return {
+    id: Number(row.id),
+    installationId: Number(row.installation_id),
+    owner: row.owner,
+    repo: row.repo,
+    issueNumber: Number(row.issue_number),
+    state: row.state as RunState,
+    context: (row.context as Record<string, unknown>) ?? {},
+  };
+}
+
+/** Postgres-backed Store. Schema lives in migrations/002_phase1_core.sql. */
+export class PgStore implements Store {
+  constructor(private readonly pool: Pool) {}
+
+  async enqueueJob(input: { type: JobType; payload: JobPayload }): Promise<Job> {
+    const { rows } = await this.pool.query(
+      `INSERT INTO jobs (type, payload) VALUES ($1, $2)
+       RETURNING id, type, payload, status, attempts`,
+      [input.type, JSON.stringify(input.payload)],
+    );
+    return mapJob(rows[0]!);
+  }
+
+  async claimNextJob(): Promise<Job | null> {
+    const { rows } = await this.pool.query(
+      `UPDATE jobs
+         SET status = 'in_progress', locked_at = now(), attempts = attempts + 1, updated_at = now()
+       WHERE id = (
+         SELECT id FROM jobs
+          WHERE status = 'queued'
+          ORDER BY id
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+       )
+       RETURNING id, type, payload, status, attempts`,
+    );
+    return rows[0] ? mapJob(rows[0]) : null;
+  }
+
+  async markJobDone(jobId: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE jobs SET status = 'done', updated_at = now() WHERE id = $1`,
+      [jobId],
+    );
+  }
+
+  async markJobFailed(jobId: number, error: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE jobs SET status = 'failed', last_error = $2, updated_at = now() WHERE id = $1`,
+      [jobId, error],
+    );
+  }
+
+  async findOrCreateRun(key: RunKey, initialState: RunState): Promise<FindOrCreateRunResult> {
+    const { rows } = await this.pool.query(
+      `INSERT INTO runs (installation_id, owner, repo, issue_number, state)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (installation_id, owner, repo, issue_number)
+       DO UPDATE SET updated_at = now()
+       RETURNING id, installation_id, owner, repo, issue_number, state, context, (xmax = 0) AS created`,
+      [key.installationId, key.owner, key.repo, key.issueNumber, initialState],
+    );
+    const row = rows[0]!;
+    return { run: mapRun(row), created: row.created === true };
+  }
+
+  async updateRunState(runId: number, state: RunState): Promise<void> {
+    await this.pool.query(`UPDATE runs SET state = $2, updated_at = now() WHERE id = $1`, [
+      runId,
+      state,
+    ]);
+  }
+
+  async getRun(key: RunKey): Promise<Run | null> {
+    const { rows } = await this.pool.query(
+      `SELECT id, installation_id, owner, repo, issue_number, state, context
+         FROM runs
+        WHERE installation_id = $1 AND owner = $2 AND repo = $3 AND issue_number = $4`,
+      [key.installationId, key.owner, key.repo, key.issueNumber],
+    );
+    return rows[0] ? mapRun(rows[0]) : null;
+  }
+
+  async tryMarkEventProcessed(deliveryId: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO processed_events (delivery_id) VALUES ($1)
+       ON CONFLICT (delivery_id) DO NOTHING
+       RETURNING delivery_id`,
+      [deliveryId],
+    );
+    return rowCount === 1;
+  }
+}
