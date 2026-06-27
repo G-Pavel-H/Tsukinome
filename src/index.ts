@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { createPool } from './db/pool.js';
 import { PgStore } from './store/pg-store.js';
 import { createProbotGitHubClient } from './github/client.js';
+import { E2BSandboxProvider } from './sandbox/e2b-sandbox.js';
 import { startWorker } from './worker/worker.js';
 
 async function main() {
@@ -24,6 +25,7 @@ async function main() {
   });
 
   const github = createProbotGitHubClient(probot);
+  const sandboxProvider = new E2BSandboxProvider(config.e2bApiKey);
   const app = createApp({ store, log: probot.log });
 
   const webhookMiddleware = await createNodeMiddleware(app, {
@@ -39,7 +41,7 @@ async function main() {
     console.log(`Webhooks:     http://localhost:${config.port}/api/github/webhooks`);
   });
 
-  const worker = startWorker({ store, github, log: probot.log });
+  const worker = startWorker({ store, github, sandboxProvider, log: probot.log });
 
   const shutdown = (signal: string) => {
     console.log(`Received ${signal}, shutting down...`);

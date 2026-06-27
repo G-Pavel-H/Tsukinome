@@ -15,11 +15,13 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "migrate": "node-pg-migrate",
-    "dev:smee": "smee --url $SMEE_URL --path /api/github/webhooks --port 3000"
+    "dev:smee": "smee --url $SMEE_URL --path /api/github/webhooks --port 3000",
+    "debug:run-tests": "tsx scripts/debug-run-tests.ts"
   },
   "license": "MIT",
   "dependencies": {
     "dotenv": "^17.4.2",
+    "e2b": "^2.31.0",
     "node-pg-migrate": "^8.0.4",
     "pg": "^8.22.0",
     "probot": "^14.3.2"

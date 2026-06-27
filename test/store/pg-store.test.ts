@@ -33,7 +33,7 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
   });
 
   beforeEach(async () => {
-    await pool.query('TRUNCATE jobs, runs, processed_events RESTART IDENTITY');
+    await pool.query('TRUNCATE jobs, runs, processed_events, test_runs RESTART IDENTITY CASCADE');
   });
 
   afterAll(async () => {
@@ -77,5 +77,27 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
   it('dedupes processed events by delivery id', async () => {
     expect(await store.tryMarkEventProcessed('x-1')).toBe(true);
     expect(await store.tryMarkEventProcessed('x-1')).toBe(false);
+  });
+
+  it('records and lists test runs against a run', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    const recorded = await store.recordTestRun({
+      runId: run.id,
+      status: 'passed',
+      exitCode: 0,
+      durationMs: 4200,
+      command: 'npm test',
+      outputTail: 'ok',
+    });
+    expect(recorded.id).toBeGreaterThan(0);
+
+    const list = await store.getTestRuns(run.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      status: 'passed',
+      exitCode: 0,
+      durationMs: 4200,
+      command: 'npm test',
+    });
   });
 });

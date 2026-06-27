@@ -4,6 +4,7 @@ export interface Config {
   webhookSecret: string;
   anthropicApiKey: string;
   databaseUrl: string;
+  e2bApiKey: string;
   port: number;
 }
 
@@ -13,6 +14,7 @@ const REQUIRED_VARS = [
   'WEBHOOK_SECRET',
   'ANTHROPIC_API_KEY',
   'DATABASE_URL',
+  'E2B_API_KEY',
 ] as const;
 
 export function loadConfig(): Config {
@@ -27,6 +29,7 @@ export function loadConfig(): Config {
     webhookSecret: process.env.WEBHOOK_SECRET!,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
     databaseUrl: process.env.DATABASE_URL!,
+    e2bApiKey: process.env.E2B_API_KEY!,
     port: parseInt(process.env.PORT ?? '3000', 10),
   };
 }

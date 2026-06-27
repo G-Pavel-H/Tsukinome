@@ -8,6 +8,7 @@ describe('loadConfig', () => {
     WEBHOOK_SECRET: 'fake-webhook-secret',
     ANTHROPIC_API_KEY: 'sk-ant-fake-key',
     DATABASE_URL: 'postgres://localhost:5432/tsukinome',
+    E2B_API_KEY: 'e2b-fake-key',
   };
 
   let originalEnv: NodeJS.ProcessEnv;
@@ -71,5 +72,16 @@ describe('loadConfig', () => {
     const { DATABASE_URL: _, ...rest } = validEnv;
     Object.assign(process.env, rest);
     expect(() => loadConfig()).toThrow('DATABASE_URL');
+  });
+
+  it('throws when E2B_API_KEY is missing', () => {
+    const { E2B_API_KEY: _, ...rest } = validEnv;
+    Object.assign(process.env, rest);
+    expect(() => loadConfig()).toThrow('E2B_API_KEY');
+  });
+
+  it('parses E2B_API_KEY into the config', () => {
+    Object.assign(process.env, validEnv);
+    expect(loadConfig().e2bApiKey).toBe('e2b-fake-key');
   });
 });

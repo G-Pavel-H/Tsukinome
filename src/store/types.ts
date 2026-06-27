@@ -1,3 +1,5 @@
+import type { TestFailureStage, TestRunStatus } from '../sandbox/types.js';
+
 /**
  * Run state machine. The full pipeline is enumerated here so transitions are
  * named from the start; Phase 1 only exercises `received` -> `acknowledged`.
@@ -26,8 +28,8 @@ export type RunState = (typeof RunState)[keyof typeof RunState];
 
 export type JobStatus = 'queued' | 'in_progress' | 'done' | 'failed';
 
-/** Phase 1 has a single job type; this widens as the pipeline grows. */
-export type JobType = 'issue_opened';
+/** Job types grow with the pipeline. */
+export type JobType = 'issue_opened' | 'run_tests';
 
 /** Payload for an `issue_opened` job — enough for the worker to act out-of-band. */
 export interface IssueOpenedPayload {
@@ -38,7 +40,16 @@ export interface IssueOpenedPayload {
   deliveryId: string;
 }
 
-export type JobPayload = IssueOpenedPayload;
+/** Payload for a `run_tests` job (Phase 2 debug-triggered sandbox test run). */
+export interface RunTestsPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  ref: string;
+  issueNumber: number;
+}
+
+export type JobPayload = IssueOpenedPayload | RunTestsPayload;
 
 export interface Job {
   id: number;
@@ -72,6 +83,20 @@ export interface FindOrCreateRunResult {
   created: boolean;
 }
 
+export interface RecordTestRunInput {
+  runId: number;
+  status: TestRunStatus;
+  exitCode: number | null;
+  durationMs: number;
+  command: string;
+  failureStage?: TestFailureStage;
+  outputTail: string;
+}
+
+export interface TestRun extends RecordTestRunInput {
+  id: number;
+}
+
 /**
  * Persistence boundary for the queue, runs, and webhook dedupe. Two
  * implementations: PgStore (production) and InMemoryStore (tests / no-DB dev).
@@ -87,4 +112,6 @@ export interface Store {
   getRun(key: RunKey): Promise<Run | null>;
   /** Returns true if the delivery id was newly recorded, false if already seen. */
   tryMarkEventProcessed(deliveryId: string): Promise<boolean>;
+  recordTestRun(input: RecordTestRunInput): Promise<TestRun>;
+  getTestRuns(runId: number): Promise<TestRun[]>;
 }

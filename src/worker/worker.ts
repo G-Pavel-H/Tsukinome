@@ -1,11 +1,13 @@
 import type { GitHubClient } from '../github/client.js';
 import type { Logger } from '../log.js';
 import type { Job, Store } from '../store/types.js';
-import { handleIssueOpened } from './handlers.js';
+import type { SandboxProvider } from '../sandbox/types.js';
+import { handleIssueOpened, handleRunTests } from './handlers.js';
 
 export interface WorkerDeps {
   store: Store;
   github: GitHubClient;
+  sandboxProvider: SandboxProvider;
   log: Logger;
 }
 
@@ -15,6 +17,9 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
   switch (job.type) {
     case 'issue_opened':
       await handleIssueOpened(job, deps);
+      return;
+    case 'run_tests':
+      await handleRunTests(job, deps);
       return;
     default:
       throw new Error(`Unknown job type: ${String(job.type)}`);

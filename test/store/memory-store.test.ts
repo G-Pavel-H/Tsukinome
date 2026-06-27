@@ -82,6 +82,31 @@ describe('InMemoryStore — runs', () => {
   });
 });
 
+describe('InMemoryStore — test runs', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('records and lists test runs for a run', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    const recorded = await store.recordTestRun({
+      runId: run.id,
+      status: 'failed',
+      exitCode: 1,
+      durationMs: 1200,
+      command: 'npm test',
+      failureStage: 'test',
+      outputTail: '1 failing',
+    });
+    expect(recorded.id).toBeGreaterThan(0);
+
+    const list = await store.getTestRuns(run.id);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ status: 'failed', exitCode: 1, command: 'npm test' });
+  });
+});
+
 describe('InMemoryStore — processed events', () => {
   let store: InMemoryStore;
   beforeEach(() => {

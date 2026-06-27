@@ -1,11 +1,17 @@
 import type { GitHubClient } from '../github/client.js';
 import type { Logger } from '../log.js';
-import { RunState, type Job, type Store } from '../store/types.js';
+import { RunState, type Job, type RunTestsPayload, type Store } from '../store/types.js';
+import type { SandboxProvider } from '../sandbox/types.js';
+import { runTests } from '../sandbox/run-tests.js';
 
 export interface HandlerDeps {
   store: Store;
   github: GitHubClient;
   log: Logger;
+}
+
+export interface RunTestsHandlerDeps extends HandlerDeps {
+  sandboxProvider: SandboxProvider;
 }
 
 /** The acknowledgement comment posted when Tsukinome picks up an issue. */
@@ -52,5 +58,48 @@ export async function handleIssueOpened(job: Job, deps: HandlerDeps): Promise<vo
   log.info(
     { jobId: job.id, runId: run.id, repo: `${owner}/${repo}`, issue: issueNumber },
     'Posted acknowledgement comment and advanced run to acknowledged',
+  );
+}
+
+/**
+ * Handle a `run_tests` job (Phase 2, debug-triggered): mint a least-privilege
+ * token, clone + test the target repo in an ephemeral sandbox, and persist the
+ * structured result. Never throws on a red suite — that is recorded as `failed`.
+ */
+export async function handleRunTests(job: Job, deps: RunTestsHandlerDeps): Promise<void> {
+  const { store, github, sandboxProvider, log } = deps;
+  // Safe narrow: the worker only routes `run_tests` jobs here.
+  const payload = job.payload as RunTestsPayload;
+  const { installationId, owner, repo, ref, issueNumber } = payload;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  const token = await github.getInstallationToken({ installationId, owner, repo });
+
+  const result = await runTests({ token, owner, repo, ref }, { sandboxProvider, log });
+
+  await store.recordTestRun({
+    runId: run.id,
+    status: result.status,
+    exitCode: result.exitCode,
+    durationMs: result.durationMs,
+    command: result.command,
+    failureStage: result.failureStage,
+    outputTail: result.outputTail,
+  });
+
+  log.info(
+    {
+      jobId: job.id,
+      runId: run.id,
+      repo: `${owner}/${repo}`,
+      ref,
+      status: result.status,
+      durationMs: result.durationMs,
+    },
+    'Recorded sandbox test run',
   );
 }

@@ -4,11 +4,14 @@ import type {
   Job,
   JobPayload,
   JobType,
+  RecordTestRunInput,
   Run,
   RunKey,
   RunState,
   Store,
+  TestRun,
 } from './types.js';
+import type { TestFailureStage, TestRunStatus } from '../sandbox/types.js';
 
 function mapJob(row: QueryResultRow): Job {
   return {
@@ -17,6 +20,19 @@ function mapJob(row: QueryResultRow): Job {
     payload: row.payload as JobPayload,
     status: row.status,
     attempts: Number(row.attempts),
+  };
+}
+
+function mapTestRun(row: QueryResultRow): TestRun {
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id),
+    status: row.status as TestRunStatus,
+    exitCode: row.exit_code === null ? null : Number(row.exit_code),
+    durationMs: Number(row.duration_ms),
+    command: row.command,
+    failureStage: (row.failure_stage as TestFailureStage | null) ?? undefined,
+    outputTail: row.output_tail ?? '',
   };
 }
 
@@ -113,5 +129,32 @@ export class PgStore implements Store {
       [deliveryId],
     );
     return rowCount === 1;
+  }
+
+  async recordTestRun(input: RecordTestRunInput): Promise<TestRun> {
+    const { rows } = await this.pool.query(
+      `INSERT INTO test_runs (run_id, status, exit_code, duration_ms, command, failure_stage, output_tail)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, run_id, status, exit_code, duration_ms, command, failure_stage, output_tail`,
+      [
+        input.runId,
+        input.status,
+        input.exitCode,
+        input.durationMs,
+        input.command,
+        input.failureStage ?? null,
+        input.outputTail,
+      ],
+    );
+    return mapTestRun(rows[0]!);
+  }
+
+  async getTestRuns(runId: number): Promise<TestRun[]> {
+    const { rows } = await this.pool.query(
+      `SELECT id, run_id, status, exit_code, duration_ms, command, failure_stage, output_tail
+         FROM test_runs WHERE run_id = $1 ORDER BY id`,
+      [runId],
+    );
+    return rows.map(mapTestRun);
   }
 }

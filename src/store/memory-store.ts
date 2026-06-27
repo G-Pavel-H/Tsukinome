@@ -3,10 +3,12 @@ import type {
   Job,
   JobPayload,
   JobType,
+  RecordTestRunInput,
   Run,
   RunKey,
   RunState,
   Store,
+  TestRun,
 } from './types.js';
 
 function runKeyOf(key: RunKey): string {
@@ -21,8 +23,10 @@ export class InMemoryStore implements Store {
   private jobs = new Map<number, Job>();
   private runs = new Map<string, Run>();
   private processedEvents = new Set<string>();
+  private testRuns: TestRun[] = [];
   private nextJobId = 1;
   private nextRunId = 1;
+  private nextTestRunId = 1;
 
   async enqueueJob(input: { type: JobType; payload: JobPayload }): Promise<Job> {
     const job: Job = {
@@ -92,6 +96,16 @@ export class InMemoryStore implements Store {
     if (this.processedEvents.has(deliveryId)) return false;
     this.processedEvents.add(deliveryId);
     return true;
+  }
+
+  async recordTestRun(input: RecordTestRunInput): Promise<TestRun> {
+    const testRun: TestRun = { id: this.nextTestRunId++, ...input };
+    this.testRuns.push(testRun);
+    return { ...testRun };
+  }
+
+  async getTestRuns(runId: number): Promise<TestRun[]> {
+    return this.testRuns.filter((t) => t.runId === runId).map((t) => ({ ...t }));
   }
 
   /** Test-only inspection helper (not part of the Store contract). */
