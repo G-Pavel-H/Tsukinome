@@ -3,12 +3,16 @@ import type { Logger } from '../log.js';
 import type { Job, Store } from '../store/types.js';
 import type { SandboxProvider } from '../sandbox/types.js';
 import type { LlmGateway } from '../llm/gateway.js';
+import type { CodeIndex } from '../index/types.js';
 import {
   handleClarify,
   handleIssueOpened,
+  handleProducePlan,
   handleProduceSpec,
   handleResumeClarification,
+  handleResumePlanDecision,
   handleRunTests,
+  type CloneFn,
 } from './handlers.js';
 
 export interface WorkerDeps {
@@ -16,6 +20,8 @@ export interface WorkerDeps {
   github: GitHubClient;
   sandboxProvider: SandboxProvider;
   gateway: LlmGateway;
+  codeIndex: CodeIndex;
+  cloneRepo: CloneFn;
   log: Logger;
 }
 
@@ -34,6 +40,12 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
       return;
     case 'resume_clarification':
       await handleResumeClarification(job, deps);
+      return;
+    case 'produce_plan':
+      await handleProducePlan(job, deps);
+      return;
+    case 'resume_plan_decision':
+      await handleResumePlanDecision(job, deps);
       return;
     case 'run_tests':
       await handleRunTests(job, deps);

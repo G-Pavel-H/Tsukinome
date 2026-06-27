@@ -140,6 +140,21 @@ describe('createApp — issue_comment.created (clarification resume)', () => {
     });
   });
 
+  it('enqueues a resume_plan_decision job when a human replies at the plan gate', async () => {
+    const { run } = await store.findOrCreateRun(PARKED_KEY, RunState.Received);
+    await store.updateRunState(run.id, RunState.AwaitingPlanApproval);
+
+    await probot.receive({
+      id: 'c-plan',
+      name: 'issue_comment',
+      payload: issueCommentPayload({ body: '/approve' }) as never,
+    });
+
+    const job = await store.claimNextJob();
+    expect(job!.type).toBe('resume_plan_decision');
+    expect(job!.payload).toMatchObject({ issueNumber: 42, commentBody: '/approve' });
+  });
+
   it('ignores bot comments (never resumes on its own question comment)', async () => {
     await park();
     await probot.receive({

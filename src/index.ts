@@ -9,6 +9,9 @@ import { createProbotGitHubClient } from './github/client.js';
 import { E2BSandboxProvider } from './sandbox/e2b-sandbox.js';
 import { AnthropicProvider } from './llm/anthropic-provider.js';
 import { LlmGateway } from './llm/gateway.js';
+import { PgVectorCodeIndex } from './index/pgvector-code-index.js';
+import { CocoIndexSidecarRunner, SidecarEmbeddingProvider } from './index/cocoindex-runner.js';
+import { cloneToTempDir } from './index/checkout.js';
 import { startWorker } from './worker/worker.js';
 
 async function main() {
@@ -29,6 +32,11 @@ async function main() {
   const github = createProbotGitHubClient(probot);
   const sandboxProvider = new E2BSandboxProvider(config.e2bApiKey);
   const gateway = new LlmGateway(new AnthropicProvider(config.anthropicApiKey), store, probot.log);
+  const codeIndex = new PgVectorCodeIndex(
+    pool,
+    new SidecarEmbeddingProvider(),
+    new CocoIndexSidecarRunner(config.databaseUrl),
+  );
   const app = createApp({ store, log: probot.log });
 
   const webhookMiddleware = await createNodeMiddleware(app, {
@@ -44,7 +52,15 @@ async function main() {
     console.log(`Webhooks:     http://localhost:${config.port}/api/github/webhooks`);
   });
 
-  const worker = startWorker({ store, github, sandboxProvider, gateway, log: probot.log });
+  const worker = startWorker({
+    store,
+    github,
+    sandboxProvider,
+    gateway,
+    codeIndex,
+    cloneRepo: cloneToTempDir,
+    log: probot.log,
+  });
 
   const shutdown = (signal: string) => {
     console.log(`Received ${signal}, shutting down...`);

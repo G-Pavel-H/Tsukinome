@@ -51,6 +51,8 @@ describe('handleClarify', () => {
 
     expect(github.postIssueComment).not.toHaveBeenCalled();
     expect((await store.getRunById(runId))!.state).toBe(RunState.Specified);
+    // Gate passed → planning is chained.
+    expect((await store.claimNextJob())!.type).toBe('produce_plan');
   });
 
   it('parks with a single batched question comment when within the cap', async () => {

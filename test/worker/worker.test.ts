@@ -4,9 +4,11 @@ import { InMemoryStore } from '../../src/store/memory-store.js';
 import { FakeSandboxProvider } from '../sandbox/fake-sandbox.js';
 import { FakeLlmProvider } from '../llm/fake-provider.js';
 import { LlmGateway } from '../../src/llm/gateway.js';
-import { fakeGitHub, silentLog } from '../helpers.js';
+import { fakeCodeIndex, fakeCloneRepo, fakeGitHub, silentLog } from '../helpers.js';
 
 const sandboxProvider = new FakeSandboxProvider();
+const codeIndex = fakeCodeIndex();
+const cloneRepo = fakeCloneRepo().fn;
 
 const payload = {
   installationId: 7,
@@ -26,7 +28,7 @@ describe('processNextJob', () => {
 
   it('returns false when there is no job to process', async () => {
     const github = fakeGitHub();
-    expect(await processNextJob({ store, github, sandboxProvider, gateway, log: silentLog })).toBe(
+    expect(await processNextJob({ store, github, sandboxProvider, gateway, codeIndex, cloneRepo, log: silentLog })).toBe(
       false,
     );
   });
@@ -35,7 +37,7 @@ describe('processNextJob', () => {
     const github = fakeGitHub();
     const job = await store.enqueueJob({ type: 'issue_opened', payload });
 
-    const processed = await processNextJob({ store, github, sandboxProvider, gateway, log: silentLog });
+    const processed = await processNextJob({ store, github, sandboxProvider, gateway, codeIndex, cloneRepo, log: silentLog });
     expect(processed).toBe(true);
     expect(github.postIssueComment).toHaveBeenCalledTimes(1);
     expect(store.getJob(job.id)!.status).toBe('done');
@@ -48,7 +50,7 @@ describe('processNextJob', () => {
     const github = fakeGitHub({ fail: true });
     const job = await store.enqueueJob({ type: 'issue_opened', payload });
 
-    const processed = await processNextJob({ store, github, sandboxProvider, gateway, log: silentLog });
+    const processed = await processNextJob({ store, github, sandboxProvider, gateway, codeIndex, cloneRepo, log: silentLog });
     expect(processed).toBe(true);
     expect(store.getJob(job.id)!.status).toBe('failed');
   });

@@ -36,7 +36,9 @@ export type JobType =
   | 'run_tests'
   | 'produce_spec'
   | 'clarify'
-  | 'resume_clarification';
+  | 'resume_clarification'
+  | 'produce_plan'
+  | 'resume_plan_decision';
 
 /** Payload for an `issue_opened` job — enough for the worker to act out-of-band. */
 export interface IssueOpenedPayload {
@@ -82,12 +84,32 @@ export interface ResumeClarificationPayload {
   commentBody: string;
 }
 
+/** Payload for a `produce_plan` job (Phase 7 architect + plan gate). */
+export interface ProducePlanPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+}
+
+/** Payload for a `resume_plan_decision` job (Phase 7 resume on a human gate reply). */
+export interface ResumePlanDecisionPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  /** The maintainer's gate comment — parsed for /approve, /abort, or a change request. */
+  commentBody: string;
+}
+
 export type JobPayload =
   | IssueOpenedPayload
   | RunTestsPayload
   | ProduceSpecPayload
   | ClarifyPayload
-  | ResumeClarificationPayload;
+  | ResumeClarificationPayload
+  | ProducePlanPayload
+  | ResumePlanDecisionPayload;
 
 export interface Job {
   id: number;

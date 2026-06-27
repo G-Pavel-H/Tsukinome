@@ -14,6 +14,10 @@ export function specPath(issueNumber: number): string {
   return `.tsukinome/${issueNumber}/spec.md`;
 }
 
+export function planPath(issueNumber: number): string {
+  return `.tsukinome/${issueNumber}/plan.md`;
+}
+
 export interface CommitSpecInput {
   installationId: number;
   owner: string;
@@ -40,6 +44,36 @@ export async function commitSpec(
     path,
     content: input.markdown,
     message: `Tsukinome: spec for #${input.issueNumber}`,
+  });
+  return { ...result, path };
+}
+
+export interface CommitPlanInput {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  markdown: string;
+}
+
+export interface CommitPlanResult extends CommitFileResult {
+  path: string;
+}
+
+export async function commitPlan(
+  github: GitHubClient,
+  input: CommitPlanInput,
+): Promise<CommitPlanResult> {
+  const branch = specBranch(input.issueNumber);
+  const path = planPath(input.issueNumber);
+  const result = await github.commitFile({
+    installationId: input.installationId,
+    owner: input.owner,
+    repo: input.repo,
+    branch,
+    path,
+    content: input.markdown,
+    message: `Tsukinome: plan for #${input.issueNumber}`,
   });
   return { ...result, path };
 }

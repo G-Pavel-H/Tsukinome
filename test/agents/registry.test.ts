@@ -44,4 +44,10 @@ describe('role registry', () => {
     expect(ROLES['clarifier']!.tier).toBe('triage');
     expect(ROLES['clarifier']!.schema).toBeDefined();
   });
+
+  it('defines the Phase 7 architect role on the review tier', () => {
+    expect(ROLES['architect']).toBeDefined();
+    expect(ROLES['architect']!.tier).toBe('review');
+    expect(ROLES['architect']!.schema).toBeDefined();
+  });
 });

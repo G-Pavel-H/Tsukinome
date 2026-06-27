@@ -46,3 +46,23 @@ export const clarificationSchema = z.object({
   questions: z.array(z.string()),
 });
 export type Clarification = z.infer<typeof clarificationSchema>;
+
+/** Architect output (Phase 7): a technical plan for the approval gate. */
+export const planSchema = z.object({
+  summary: z.string(),
+  approach: z.string(),
+  affectedFiles: z.array(
+    z.object({
+      path: z.string(),
+      change: z.enum(['add', 'modify', 'delete']),
+      reason: z.string(),
+    }),
+  ),
+  /** Interfaces / signatures / public contracts introduced or changed. */
+  contracts: z.array(z.string()),
+  /** Schema, migration, or data-model changes. */
+  dataChanges: z.array(z.string()),
+  /** How the work will be tested (drives the Phase 8 TDD loop). */
+  testStrategy: z.array(z.string()),
+});
+export type Plan = z.infer<typeof planSchema>;

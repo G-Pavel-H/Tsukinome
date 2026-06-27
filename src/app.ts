@@ -91,22 +91,30 @@ export function createApp(deps: AppDeps): (probot: Probot) => void {
         issueNumber,
       };
       const run = await store.getRun(key);
-      if (!run || run.state !== RunState.AwaitingClarification) {
+      const commentBody = comment.body ?? '';
+
+      // Route the reply to whichever gate the run is parked at.
+      if (run?.state === RunState.AwaitingClarification) {
+        await store.enqueueJob({ type: 'resume_clarification', payload: { ...key, commentBody } });
         log.info(
-          { deliveryId, repo: repository.full_name, issue: issueNumber, state: run?.state },
-          'Comment not on a run awaiting clarification; ignoring',
+          { deliveryId, repo: repository.full_name, issue: issueNumber, runId: run.id },
+          'Enqueued resume_clarification job',
         );
         return;
       }
 
-      await store.enqueueJob({
-        type: 'resume_clarification',
-        payload: { ...key, commentBody: comment.body ?? '' },
-      });
+      if (run?.state === RunState.AwaitingPlanApproval) {
+        await store.enqueueJob({ type: 'resume_plan_decision', payload: { ...key, commentBody } });
+        log.info(
+          { deliveryId, repo: repository.full_name, issue: issueNumber, runId: run.id },
+          'Enqueued resume_plan_decision job',
+        );
+        return;
+      }
 
       log.info(
-        { deliveryId, repo: repository.full_name, issue: issueNumber, runId: run.id },
-        'Enqueued resume_clarification job',
+        { deliveryId, repo: repository.full_name, issue: issueNumber, state: run?.state },
+        'Comment not on a run awaiting a human gate; ignoring',
       );
     });
 

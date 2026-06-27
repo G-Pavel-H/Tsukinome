@@ -86,6 +86,8 @@ describe('handleResumeClarification', () => {
     expect(github.postIssueComment).toHaveBeenCalledTimes(1);
     expect(github.calls[0]!.body.toLowerCase()).toContain('updated');
     expect((await store.getRunById(runId))!.state).toBe(RunState.Specified);
+    // Finalized spec → planning is chained.
+    expect((await store.claimNextJob())!.type).toBe('produce_plan');
   });
 
   it('is idempotent — skips when the run is not awaiting clarification', async () => {

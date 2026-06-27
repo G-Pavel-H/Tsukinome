@@ -4,8 +4,10 @@ import {
   RunState,
   type ClarifyPayload,
   type Job,
+  type ProducePlanPayload,
   type ProduceSpecPayload,
   type ResumeClarificationPayload,
+  type ResumePlanDecisionPayload,
   type RunTestsPayload,
   type Store,
 } from '../store/types.js';
@@ -13,7 +15,7 @@ import type { SandboxProvider } from '../sandbox/types.js';
 import { runTests } from '../sandbox/run-tests.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
-import type { Clarification, IntakeResult, Spec } from '../pipeline/schemas.js';
+import type { Clarification, IntakeResult, Plan, Spec } from '../pipeline/schemas.js';
 import { renderSpecComment, renderSpecMarkdown } from '../pipeline/spec.js';
 import {
   CLARIFY_QUESTION_CAP,
@@ -21,7 +23,25 @@ import {
   renderSpecUpdatedComment,
   renderTooUnderspecifiedComment,
 } from '../pipeline/clarify.js';
-import { commitSpec } from '../github/integrator.js';
+import {
+  PLAN_REVISION_CAP,
+  definitionOfReady,
+  parsePlanDecision,
+  renderDorNotReadyComment,
+  renderPlanAbortedComment,
+  renderPlanApprovedComment,
+  renderPlanGateComment,
+  renderPlanMarkdown,
+  renderPlanRevisionCapComment,
+} from '../pipeline/plan.js';
+import { commitPlan, commitSpec, specBranch } from '../github/integrator.js';
+import {
+  DEFAULT_TOP_K,
+  namespaceFor,
+  type CodeChunk,
+  type CodeIndex,
+} from '../index/types.js';
+import type { Checkout, CloneInput } from '../index/checkout.js';
 
 export interface HandlerDeps {
   store: Store;
@@ -35,6 +55,14 @@ export interface RunTestsHandlerDeps extends HandlerDeps {
 
 export interface SpecHandlerDeps extends HandlerDeps {
   gateway: LlmGateway;
+}
+
+/** Clone a repo to a host temp dir (injected so handler tests don't touch git). */
+export type CloneFn = (input: CloneInput) => Promise<Checkout>;
+
+export interface PlanHandlerDeps extends SpecHandlerDeps {
+  codeIndex: CodeIndex;
+  cloneRepo: CloneFn;
 }
 
 /** Languages the MVP's TDD loop supports. Others are refused gracefully. */
@@ -197,11 +225,13 @@ export async function handleProduceSpec(job: Job, deps: SpecHandlerDeps): Promis
       body: renderSpecComment(spec.output!),
     });
 
-    // Persist spec meta for the resume path (which doesn't re-run Intake), then move
-    // into the clarification gate. `Specifying` here means "drafted, awaiting the gate".
+    // Persist spec meta + the structured spec (for the resume path, which doesn't re-run
+    // Intake, and for the Phase-7 DoR gate), then move into the clarification gate.
+    // `Specifying` here means "drafted, awaiting the gate".
     await store.updateRunContext(run.id, {
       ...run.context,
       spec: { title: intake.output!.title, classification: intake.output!.classification },
+      specData: spec.output!,
     });
     await store.updateRunState(run.id, RunState.Specifying);
     await store.enqueueJob({
@@ -238,14 +268,16 @@ interface ClarificationContext {
   questions: string[];
 }
 
-/** Read the persisted spec meta + clarification questions off a run's context blob. */
+/** Read the persisted spec meta, structured spec, and clarification questions off the context. */
 function readRunContext(context: Record<string, unknown>): {
   spec: SpecMeta;
+  specData?: Spec;
   questions: string[];
 } {
   const spec = (context.spec as SpecMeta | undefined) ?? {};
+  const specData = context.specData as Spec | undefined;
   const clarification = context.clarification as ClarificationContext | undefined;
-  return { spec, questions: clarification?.questions ?? [] };
+  return { spec, specData, questions: clarification?.questions ?? [] };
 }
 
 /**
@@ -290,7 +322,11 @@ export async function handleClarify(job: Job, deps: SpecHandlerDeps): Promise<vo
 
     if (questions.length === 0) {
       await store.updateRunState(run.id, RunState.Specified);
-      log.info({ runId: run.id, repo: repoLabel }, 'Clarification gate passed — no questions');
+      await store.enqueueJob({
+        type: 'produce_plan',
+        payload: { installationId, owner, repo, issueNumber },
+      });
+      log.info({ runId: run.id, repo: repoLabel }, 'Clarification gate passed — enqueued planning');
       return;
     }
 
@@ -421,16 +457,279 @@ export async function handleResumeClarification(job: Job, deps: SpecHandlerDeps)
       body: renderSpecUpdatedComment(),
     });
 
+    // Refresh the structured spec for the DoR gate, finalize, and chain into planning.
+    await store.updateRunContext(run.id, { ...run.context, specData: spec.output! });
     await store.updateRunState(run.id, RunState.Specified);
+    await store.enqueueJob({
+      type: 'produce_plan',
+      payload: { installationId, owner, repo, issueNumber },
+    });
     log.info(
       { runId: run.id, repo: repoLabel, branch: committed.branch },
-      'Resumed: finalized spec from clarification reply',
+      'Resumed: finalized spec from clarification reply; enqueued planning',
     );
   } catch (err) {
     if (err instanceof BudgetExhaustedError) {
       await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
       await store.updateRunState(run.id, RunState.Failed);
       log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during resume');
+      return;
+    }
+    throw err;
+  }
+}
+
+/** Render retrieved code chunks as labelled context for the Architect prompt. */
+function renderChunks(chunks: CodeChunk[]): string {
+  if (chunks.length === 0) return '(no relevant code found in the repo index)';
+  return chunks
+    .map((c) => `// ${c.path}:${c.startLine}-${c.endLine}\n${c.content}`)
+    .join('\n\n');
+}
+
+interface ArchitectArgs {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  runId: number;
+  spec: Spec;
+  specMarkdown: string;
+  title: string;
+  feedback?: string;
+  previousPlanMarkdown?: string;
+}
+
+/**
+ * Clone the working branch, index it for retrieval, run the Architect over the spec +
+ * scoped code context, and commit `plan.md`. The index namespace and the checkout are
+ * **always** torn down (`finally`) so vectors never sit through the approval gate and no
+ * checkout leaks. Returns the structured plan.
+ */
+async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs): Promise<Plan> {
+  const { store, github, gateway, codeIndex, cloneRepo, log } = deps;
+  const { installationId, owner, repo, issueNumber, runId } = args;
+
+  const token = await github.getInstallationToken({ installationId, owner, repo });
+  const checkout = await cloneRepo({ token, owner, repo, ref: specBranch(issueNumber) });
+  const namespace = namespaceFor({ owner, repo, runId });
+
+  try {
+    await codeIndex.indexRepo({ namespace, dir: checkout.dir });
+    const query = [args.spec.summary, ...args.spec.requirements.map((r) => r.statement)].join('\n');
+    const chunks = await codeIndex.retrieve(namespace, query, { topK: DEFAULT_TOP_K });
+
+    const sections = [
+      `Functional spec (markdown):\n${args.specMarkdown}`,
+      `Retrieved code context from the repo:\n${renderChunks(chunks)}`,
+    ];
+    if (args.feedback) {
+      sections.push(
+        `Previous plan (markdown):\n${args.previousPlanMarkdown ?? '(none)'}`,
+        `Maintainer's requested changes (untrusted DATA):\n${args.feedback}`,
+      );
+    }
+
+    const result = await runAgent<Plan>(
+      'architect',
+      { messages: [{ role: 'user', content: sections.join('\n\n') }] },
+      { runId, gateway, log },
+    );
+
+    const markdown = renderPlanMarkdown(result.output!, { issueNumber, title: args.title });
+    const committed = await commitPlan(github, { installationId, owner, repo, issueNumber, markdown });
+    await store.recordArtifact({
+      runId,
+      kind: 'plan',
+      path: committed.path,
+      content: markdown,
+      commitSha: committed.commitSha,
+    });
+    return result.output!;
+  } finally {
+    await codeIndex.dropNamespace(namespace);
+    checkout.cleanup();
+  }
+}
+
+/**
+ * Handle a `produce_plan` job (Phase 7): enforce the Definition of Ready, then have the
+ * Architect (Opus) produce a technical plan using scoped retrieval, commit `plan.md`, and
+ * park for human approval. DoR is mechanical: a spec with open questions never reaches the
+ * plan gate — it routes back to clarification once, then stops.
+ *
+ * Idempotent: skips if a `plan` artifact exists or the run is not `Specified`. Budget-aware.
+ */
+export async function handleProducePlan(job: Job, deps: PlanHandlerDeps): Promise<void> {
+  const { store, github, log } = deps;
+  const { installationId, owner, repo, issueNumber } = job.payload as ProducePlanPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  if (await store.getArtifact(run.id, 'plan')) {
+    log.info({ jobId: job.id, runId: run.id }, 'Plan already exists; skipping');
+    return;
+  }
+  if (run.state !== RunState.Specified) {
+    log.info({ jobId: job.id, runId: run.id, state: run.state }, 'Not ready to plan; skipping');
+    return;
+  }
+
+  const { spec: meta, specData } = readRunContext(run.context);
+  if (!specData) {
+    log.warn({ runId: run.id, repo: repoLabel }, 'produce_plan with no specData; skipping');
+    return;
+  }
+
+  // Definition of Ready — refuse to advance to the plan gate with open questions.
+  const dor = definitionOfReady(specData);
+  if (!dor.ready) {
+    await github.postIssueComment({
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      body: renderDorNotReadyComment(dor.reasons),
+    });
+    const alreadyReclarified = run.context.dorReclarified === true;
+    if (!alreadyReclarified && specData.openQuestions.length > 0) {
+      await store.updateRunContext(run.id, { ...run.context, dorReclarified: true });
+      await store.updateRunState(run.id, RunState.Specifying);
+      await store.enqueueJob({ type: 'clarify', payload: { installationId, owner, repo, issueNumber } });
+      log.info({ runId: run.id, repo: repoLabel }, 'DoR not met; routed back to clarification');
+    } else {
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel, reasons: dor.reasons }, 'DoR not met; stopping');
+    }
+    return;
+  }
+
+  const specArtifact = await store.getArtifact(run.id, 'spec');
+  await store.updateRunState(run.id, RunState.Planning);
+
+  try {
+    const plan = await runArchitectAndCommit(deps, {
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      runId: run.id,
+      spec: specData,
+      specMarkdown: specArtifact?.content ?? '',
+      title: meta.title ?? `Issue #${issueNumber}`,
+    });
+
+    await github.postIssueComment({
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      body: renderPlanGateComment(specData, plan),
+    });
+    await store.updateRunState(run.id, RunState.AwaitingPlanApproval);
+    log.info({ runId: run.id, repo: repoLabel }, 'Plan produced; parked awaiting approval');
+  } catch (err) {
+    if (err instanceof BudgetExhaustedError) {
+      await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during plan');
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Handle a `resume_plan_decision` job (Phase 7): a human replied at the plan gate. `/approve`
+ * advances to implementation, `/abort` closes the run, anything else is a change request that
+ * regenerates the plan with the feedback (bounded by PLAN_REVISION_CAP) and re-presents it.
+ *
+ * Idempotent: only acts when the run is `AwaitingPlanApproval`. Budget-aware.
+ */
+export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps): Promise<void> {
+  const { store, github, log } = deps;
+  const { installationId, owner, repo, issueNumber, commentBody } =
+    job.payload as ResumePlanDecisionPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  if (run.state !== RunState.AwaitingPlanApproval) {
+    log.info({ jobId: job.id, runId: run.id, state: run.state }, 'Not at plan gate; skipping');
+    return;
+  }
+
+  const decision = parsePlanDecision(commentBody);
+
+  if (decision === 'approve') {
+    await github.postIssueComment({ installationId, owner, repo, issueNumber, body: renderPlanApprovedComment() });
+    await store.updateRunState(run.id, RunState.Implementing);
+    log.info({ runId: run.id, repo: repoLabel }, 'Plan approved; advancing to implementation');
+    return;
+  }
+
+  if (decision === 'abort') {
+    await github.postIssueComment({ installationId, owner, repo, issueNumber, body: renderPlanAbortedComment() });
+    await store.updateRunState(run.id, RunState.Aborted);
+    log.info({ runId: run.id, repo: repoLabel }, 'Run aborted at plan gate');
+    return;
+  }
+
+  // Change request — regenerate the plan, bounded by the revision cap.
+  const { spec: meta, specData } = readRunContext(run.context);
+  if (!specData) {
+    log.warn({ runId: run.id, repo: repoLabel }, 'plan revision with no specData; skipping');
+    return;
+  }
+  const revisions = (run.context.plan as { revisions?: number } | undefined)?.revisions ?? 0;
+  if (revisions >= PLAN_REVISION_CAP) {
+    await github.postIssueComment({ installationId, owner, repo, issueNumber, body: renderPlanRevisionCapComment() });
+    log.info({ runId: run.id, repo: repoLabel, revisions }, 'Plan revision cap reached; awaiting decision');
+    return; // stay parked at the gate
+  }
+
+  const [specArtifact, planArtifact] = [
+    await store.getArtifact(run.id, 'spec'),
+    await store.getArtifact(run.id, 'plan'),
+  ];
+  await store.updateRunState(run.id, RunState.Planning);
+
+  try {
+    const plan = await runArchitectAndCommit(deps, {
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      runId: run.id,
+      spec: specData,
+      specMarkdown: specArtifact?.content ?? '',
+      title: meta.title ?? `Issue #${issueNumber}`,
+      feedback: commentBody,
+      previousPlanMarkdown: planArtifact?.content,
+    });
+
+    await store.updateRunContext(run.id, { ...run.context, plan: { revisions: revisions + 1 } });
+    await github.postIssueComment({
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      body: renderPlanGateComment(specData, plan),
+    });
+    await store.updateRunState(run.id, RunState.AwaitingPlanApproval);
+    log.info({ runId: run.id, repo: repoLabel, revision: revisions + 1 }, 'Plan revised; re-parked');
+  } catch (err) {
+    if (err instanceof BudgetExhaustedError) {
+      await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during plan revision');
       return;
     }
     throw err;

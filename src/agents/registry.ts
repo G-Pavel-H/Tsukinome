@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { clarificationSchema, intakeSchema, specSchema } from '../pipeline/schemas.js';
+import { clarificationSchema, intakeSchema, planSchema, specSchema } from '../pipeline/schemas.js';
 import type { RoleDefinition, ToolDefinition } from './types.js';
 
 export { TIER_MODELS } from '../llm/models.js';
@@ -64,5 +64,14 @@ export const ROLES: Record<string, RoleDefinition> = {
     tier: 'triage',
     schema: clarificationSchema,
     maxTokens: 1024,
+  },
+
+  // --- Phase 7 architect & plan gate ---
+  architect: {
+    name: 'architect',
+    instructionFile: 'architect.md',
+    tier: 'review',
+    schema: planSchema,
+    maxTokens: 4096,
   },
 };
