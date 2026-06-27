@@ -34,7 +34,7 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
 
   beforeEach(async () => {
     await pool.query(
-      'TRUNCATE jobs, runs, processed_events, test_runs, llm_calls, artifacts RESTART IDENTITY CASCADE',
+      'TRUNCATE jobs, runs, processed_events, test_runs, llm_calls, artifacts, tasks RESTART IDENTITY CASCADE',
     );
   });
 
@@ -140,6 +140,28 @@ describe.skipIf(!DATABASE_URL)('PgStore (integration)', () => {
     const artifact = await store.getArtifact(run.id, 'spec');
     expect(artifact!.content).toBe('# v2');
     expect(artifact!.commitSha).toBe('bbb');
+  });
+
+  it('records, lists (ordered), and updates tasks', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    const t = await store.recordTask({
+      runId: run.id,
+      idx: 0,
+      title: 'first',
+      description: 'do the thing',
+      acceptanceCriteria: ['AC1', 'AC2'],
+    });
+    expect(t.status).toBe('pending');
+    expect(t.acceptanceCriteria).toEqual(['AC1', 'AC2']);
+
+    await store.updateTask(t.id, { status: 'done', redObserved: true, greenObserved: true, commitSha: 'deadbeef' });
+    const [reloaded] = await store.getTasks(run.id);
+    expect(reloaded).toMatchObject({
+      status: 'done',
+      redObserved: true,
+      greenObserved: true,
+      commitSha: 'deadbeef',
+    });
   });
 
   it('records and lists test runs against a run', async () => {

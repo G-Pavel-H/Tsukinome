@@ -41,6 +41,19 @@ describe('runAgent — single-shot structured role', () => {
       runAgent('example-echo', { messages: [{ role: 'user', content: 'x' }] }, ctx),
     ).rejects.toBeTruthy();
   });
+
+  it('honors a tier override (escalation ladder → Opus)', async () => {
+    const provider = new FakeLlmProvider([textResponse(JSON.stringify({ echoed: 'x' }))]);
+    const ctx = await context(store, provider);
+
+    await runAgent(
+      'example-echo', // default tier: triage (Haiku)
+      { messages: [{ role: 'user', content: 'x' }], tierOverride: 'review' },
+      ctx,
+    );
+
+    expect(provider.requests[0]!.model).toBe('claude-opus-4-8');
+  });
 });
 
 describe('runAgent — tool-use loop', () => {

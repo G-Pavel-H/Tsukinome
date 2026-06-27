@@ -12,6 +12,7 @@ import { LlmGateway } from './llm/gateway.js';
 import { PgVectorCodeIndex } from './index/pgvector-code-index.js';
 import { CocoIndexSidecarRunner, SidecarEmbeddingProvider } from './index/cocoindex-runner.js';
 import { cloneToTempDir } from './index/checkout.js';
+import { openCodeSandbox } from './sandbox/code-sandbox.js';
 import { startWorker } from './worker/worker.js';
 
 async function main() {
@@ -59,6 +60,7 @@ async function main() {
     gateway,
     codeIndex,
     cloneRepo: cloneToTempDir,
+    openSandbox: openCodeSandbox,
     log: probot.log,
   });
 

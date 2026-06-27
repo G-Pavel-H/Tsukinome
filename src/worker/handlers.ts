@@ -3,6 +3,7 @@ import type { Logger } from '../log.js';
 import {
   RunState,
   type ClarifyPayload,
+  type ImplementPayload,
   type Job,
   type ProducePlanPayload,
   type ProduceSpecPayload,
@@ -13,8 +14,11 @@ import {
 } from '../store/types.js';
 import type { SandboxProvider } from '../sandbox/types.js';
 import { runTests } from '../sandbox/run-tests.js';
+import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
+import { decompose, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
+import { renderEscalationComment, renderImplementationDoneComment } from '../pipeline/implement.js';
 import type { Clarification, IntakeResult, Plan, Spec } from '../pipeline/schemas.js';
 import { renderSpecComment, renderSpecMarkdown } from '../pipeline/spec.js';
 import {
@@ -34,7 +38,7 @@ import {
   renderPlanMarkdown,
   renderPlanRevisionCapComment,
 } from '../pipeline/plan.js';
-import { commitPlan, commitSpec, specBranch } from '../github/integrator.js';
+import { commitPlan, commitSpec, commitTaskFiles, specBranch } from '../github/integrator.js';
 import {
   DEFAULT_TOP_K,
   namespaceFor,
@@ -63,6 +67,12 @@ export type CloneFn = (input: CloneInput) => Promise<Checkout>;
 export interface PlanHandlerDeps extends SpecHandlerDeps {
   codeIndex: CodeIndex;
   cloneRepo: CloneFn;
+}
+
+export interface ImplementHandlerDeps extends SpecHandlerDeps {
+  sandboxProvider: SandboxProvider;
+  /** Injectable so tests drive a fake code session; defaults to the real E2B opener. */
+  openSandbox: OpenCodeSandboxFn;
 }
 
 /** Languages the MVP's TDD loop supports. Others are refused gracefully. */
@@ -268,16 +278,18 @@ interface ClarificationContext {
   questions: string[];
 }
 
-/** Read the persisted spec meta, structured spec, and clarification questions off the context. */
+/** Read the persisted spec meta, structured spec/plan, and clarification questions off the context. */
 function readRunContext(context: Record<string, unknown>): {
   spec: SpecMeta;
   specData?: Spec;
+  planData?: Plan;
   questions: string[];
 } {
   const spec = (context.spec as SpecMeta | undefined) ?? {};
   const specData = context.specData as Spec | undefined;
+  const planData = context.planData as Plan | undefined;
   const clarification = context.clarification as ClarificationContext | undefined;
-  return { spec, specData, questions: clarification?.questions ?? [] };
+  return { spec, specData, planData, questions: clarification?.questions ?? [] };
 }
 
 /**
@@ -623,6 +635,7 @@ export async function handleProducePlan(job: Job, deps: PlanHandlerDeps): Promis
       title: meta.title ?? `Issue #${issueNumber}`,
     });
 
+    await store.updateRunContext(run.id, { ...run.context, planData: plan });
     await github.postIssueComment({
       installationId,
       owner,
@@ -671,7 +684,8 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
   if (decision === 'approve') {
     await github.postIssueComment({ installationId, owner, repo, issueNumber, body: renderPlanApprovedComment() });
     await store.updateRunState(run.id, RunState.Implementing);
-    log.info({ runId: run.id, repo: repoLabel }, 'Plan approved; advancing to implementation');
+    await store.enqueueJob({ type: 'implement', payload: { installationId, owner, repo, issueNumber } });
+    log.info({ runId: run.id, repo: repoLabel }, 'Plan approved; enqueued implementation');
     return;
   }
 
@@ -715,7 +729,11 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
       previousPlanMarkdown: planArtifact?.content,
     });
 
-    await store.updateRunContext(run.id, { ...run.context, plan: { revisions: revisions + 1 } });
+    await store.updateRunContext(run.id, {
+      ...run.context,
+      planData: plan,
+      plan: { revisions: revisions + 1 },
+    });
     await github.postIssueComment({
       installationId,
       owner,
@@ -733,6 +751,159 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
       return;
     }
     throw err;
+  }
+}
+
+/**
+ * Handle an `implement` job (Phase 8): decompose the approved plan into tasks and implement
+ * each one test-first in a sandbox — observe red, make it green with the suite staying green,
+ * refactor, then commit per task. A task that can't be completed within the retry/budget caps
+ * escalates to a human (graceful `Failed`) instead of looping.
+ *
+ * Idempotent/restartable: only runs from `Implementing`; tasks already `done` are skipped (the
+ * fresh clone of the working branch already contains their commits). Budget exhaustion stops at
+ * a task boundary. The sandbox is always torn down.
+ */
+export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Promise<void> {
+  const { store, github, gateway, sandboxProvider, openSandbox, log } = deps;
+  const { installationId, owner, repo, issueNumber } = job.payload as ImplementPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  if (run.state !== RunState.Implementing) {
+    log.info({ jobId: job.id, runId: run.id, state: run.state }, 'Not implementing; skipping');
+    return;
+  }
+
+  const [specArtifact, planArtifact] = [
+    await store.getArtifact(run.id, 'spec'),
+    await store.getArtifact(run.id, 'plan'),
+  ];
+  if (!specArtifact || !planArtifact) {
+    log.warn({ runId: run.id, repo: repoLabel }, 'implement without spec/plan artifact; skipping');
+    return;
+  }
+
+  const { planData } = readRunContext(run.context);
+  const affectedPaths = planData?.affectedFiles.map((f) => f.path) ?? [];
+
+  const token = await github.getInstallationToken({ installationId, owner, repo });
+  const sandbox = await openSandbox(
+    { token, owner, repo, ref: specBranch(issueNumber) },
+    { sandboxProvider, log },
+  );
+
+  try {
+    // Decompose once; on a restart the tasks already exist and we resume.
+    let tasks = await store.getTasks(run.id);
+    if (tasks.length === 0) {
+      const specs = await decompose(specArtifact.content, planArtifact.content, {
+        runId: run.id,
+        gateway,
+        log,
+      });
+      for (let i = 0; i < specs.length; i++) {
+        await store.recordTask({
+          runId: run.id,
+          idx: i,
+          title: specs[i]!.title,
+          description: specs[i]!.description,
+          acceptanceCriteria: specs[i]!.acceptanceCriteria,
+        });
+      }
+      tasks = await store.getTasks(run.id);
+    }
+
+    const tddCtx = {
+      sandbox,
+      gateway,
+      runId: run.id,
+      log,
+      specMarkdown: specArtifact.content,
+      planMarkdown: planArtifact.content,
+      affectedPaths,
+    };
+
+    for (const task of tasks) {
+      if (task.status === 'done') continue;
+
+      // Stop at a safe boundary if the budget is spent — don't start a task we can't finish.
+      const fresh = await store.getRunById(run.id);
+      if (fresh && fresh.budgetNanoUsd - fresh.spentNanoUsd <= 0) {
+        await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
+        await store.updateRunState(run.id, RunState.Failed);
+        log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: budget exhausted at task boundary');
+        return;
+      }
+
+      const taskSpec: TaskSpec = {
+        id: `T${task.idx + 1}`,
+        title: task.title,
+        description: task.description,
+        acceptanceCriteria: task.acceptanceCriteria,
+      };
+      const outcome = await runTaskTdd(taskSpec, tddCtx);
+
+      if (outcome.status === 'escalated') {
+        await store.updateTask(task.id, {
+          status: 'escalated',
+          redObserved: outcome.redObserved,
+          greenObserved: outcome.greenObserved,
+        });
+        await github.postIssueComment({
+          installationId,
+          owner,
+          repo,
+          issueNumber,
+          body: renderEscalationComment(task.title, outcome.stage),
+        });
+        await store.updateRunState(run.id, RunState.Failed);
+        log.warn({ runId: run.id, repo: repoLabel, task: task.id, stage: outcome.stage }, 'Task escalated to human');
+        return;
+      }
+
+      // Done — commit the task's files as one commit on the working branch.
+      const changed = await sandbox.readFiles(outcome.changedPaths);
+      const commit = await commitTaskFiles(github, {
+        installationId,
+        owner,
+        repo,
+        issueNumber,
+        files: changed,
+        message: `Tsukinome: ${task.title} (#${issueNumber})`,
+      });
+      await store.updateTask(task.id, {
+        status: 'done',
+        redObserved: true,
+        greenObserved: true,
+        commitSha: commit.commitSha,
+      });
+      log.info({ runId: run.id, repo: repoLabel, task: task.id }, 'Task done; committed');
+    }
+
+    await github.postIssueComment({
+      installationId,
+      owner,
+      repo,
+      issueNumber,
+      body: renderImplementationDoneComment(tasks.length),
+    });
+    await store.updateRunState(run.id, RunState.Reviewing);
+    log.info({ runId: run.id, repo: repoLabel, tasks: tasks.length }, 'Implementation complete');
+  } catch (err) {
+    if (err instanceof BudgetExhaustedError) {
+      await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during implementation');
+      return;
+    }
+    throw err;
+  } finally {
+    await sandbox.close();
   }
 }
 

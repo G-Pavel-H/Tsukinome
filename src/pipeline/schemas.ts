@@ -66,3 +66,24 @@ export const planSchema = z.object({
   testStrategy: z.array(z.string()),
 });
 export type Plan = z.infer<typeof planSchema>;
+
+/** Decomposer output (Phase 8): the plan broken into small, independently testable tasks. */
+export const taskListSchema = z.object({
+  tasks: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      description: z.string(),
+      acceptanceCriteria: z.array(z.string()),
+    }),
+  ),
+});
+export type TaskList = z.infer<typeof taskListSchema>;
+
+/** Shared output of the Test Author / Implementer / Refactor agents: whole-file edits. */
+export const fileSetSchema = z.object({
+  files: z.array(z.object({ path: z.string(), content: z.string() })),
+  notes: z.string().optional(),
+});
+export type FileSet = z.infer<typeof fileSetSchema>;
+export type FileEdit = FileSet['files'][number];

@@ -4,8 +4,10 @@ import type { Job, Store } from '../store/types.js';
 import type { SandboxProvider } from '../sandbox/types.js';
 import type { LlmGateway } from '../llm/gateway.js';
 import type { CodeIndex } from '../index/types.js';
+import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import {
   handleClarify,
+  handleImplement,
   handleIssueOpened,
   handleProducePlan,
   handleProduceSpec,
@@ -22,6 +24,7 @@ export interface WorkerDeps {
   gateway: LlmGateway;
   codeIndex: CodeIndex;
   cloneRepo: CloneFn;
+  openSandbox: OpenCodeSandboxFn;
   log: Logger;
 }
 
@@ -46,6 +49,9 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
       return;
     case 'resume_plan_decision':
       await handleResumePlanDecision(job, deps);
+      return;
+    case 'implement':
+      await handleImplement(job, deps);
       return;
     case 'run_tests':
       await handleRunTests(job, deps);

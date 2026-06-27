@@ -1,6 +1,13 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { clarificationSchema, intakeSchema, planSchema, specSchema } from '../pipeline/schemas.js';
+import {
+  clarificationSchema,
+  fileSetSchema,
+  intakeSchema,
+  planSchema,
+  specSchema,
+  taskListSchema,
+} from '../pipeline/schemas.js';
 import type { RoleDefinition, ToolDefinition } from './types.js';
 
 export { TIER_MODELS } from '../llm/models.js';
@@ -72,6 +79,36 @@ export const ROLES: Record<string, RoleDefinition> = {
     instructionFile: 'architect.md',
     tier: 'review',
     schema: planSchema,
+    maxTokens: 4096,
+  },
+
+  // --- Phase 8 task decomposition & TDD loop ---
+  decomposer: {
+    name: 'decomposer',
+    instructionFile: 'decomposer.md',
+    tier: 'implementation',
+    schema: taskListSchema,
+    maxTokens: 2048,
+  },
+  'test-author': {
+    name: 'test-author',
+    instructionFile: 'test-author.md',
+    tier: 'implementation',
+    schema: fileSetSchema,
+    maxTokens: 4096,
+  },
+  implementer: {
+    name: 'implementer',
+    instructionFile: 'implementer.md',
+    tier: 'implementation',
+    schema: fileSetSchema,
+    maxTokens: 4096,
+  },
+  refactor: {
+    name: 'refactor',
+    instructionFile: 'refactor.md',
+    tier: 'implementation',
+    schema: fileSetSchema,
     maxTokens: 4096,
   },
 };

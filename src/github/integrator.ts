@@ -77,3 +77,27 @@ export async function commitPlan(
   });
   return { ...result, path };
 }
+
+export interface CommitTaskFilesInput {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  files: { path: string; content: string }[];
+  message: string;
+}
+
+/** Commit one task's files as a single commit on the working branch (Phase 8). */
+export async function commitTaskFiles(
+  github: GitHubClient,
+  input: CommitTaskFilesInput,
+): Promise<CommitFileResult> {
+  return github.commitFiles({
+    installationId: input.installationId,
+    owner: input.owner,
+    repo: input.repo,
+    branch: specBranch(input.issueNumber),
+    files: input.files,
+    message: input.message,
+  });
+}

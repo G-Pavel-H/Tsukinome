@@ -1,0 +1,40 @@
+import type { CodeSandbox } from '../../src/sandbox/code-sandbox.js';
+import type { TestRunStatus, TestRunResult } from '../../src/sandbox/types.js';
+
+/** In-memory CodeSandbox for engine tests: real read/write FS + scripted test outcomes. */
+export class FakeCodeSandbox implements CodeSandbox {
+  readonly files = new Map<string, string>();
+  readonly writes: { path: string; content: string }[][] = [];
+  readonly testRuns: TestRunStatus[] = [];
+  closed = 0;
+
+  /** Queue of test outcomes returned by successive runTests() calls (default: passed). */
+  constructor(private readonly queue: TestRunStatus[] = []) {}
+
+  async writeFiles(files: { path: string; content: string }[]): Promise<void> {
+    this.writes.push(files);
+    for (const f of files) this.files.set(f.path, f.content);
+  }
+
+  async runTests(): Promise<TestRunResult> {
+    const status = this.queue.shift() ?? 'passed';
+    this.testRuns.push(status);
+    return {
+      status,
+      passed: status === 'passed',
+      exitCode: status === 'passed' ? 0 : 1,
+      durationMs: 1,
+      command: 'npm test',
+      failureStage: status === 'passed' ? undefined : 'test',
+      outputTail: '',
+    };
+  }
+
+  async readFiles(paths: string[]): Promise<{ path: string; content: string }[]> {
+    return paths.filter((p) => this.files.has(p)).map((p) => ({ path: p, content: this.files.get(p)! }));
+  }
+
+  async close(): Promise<void> {
+    this.closed += 1;
+  }
+}

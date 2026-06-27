@@ -173,6 +173,39 @@ describe('InMemoryStore — artifacts', () => {
   });
 });
 
+describe('InMemoryStore — tasks', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('records tasks, lists them ordered by idx, and patches them', async () => {
+    const { run } = await store.findOrCreateRun(key, RunState.Received);
+    const t1 = await store.recordTask({
+      runId: run.id,
+      idx: 1,
+      title: 'second',
+      description: 'b',
+      acceptanceCriteria: ['c2'],
+    });
+    await store.recordTask({
+      runId: run.id,
+      idx: 0,
+      title: 'first',
+      description: 'a',
+      acceptanceCriteria: ['c1'],
+    });
+
+    const tasks = await store.getTasks(run.id);
+    expect(tasks.map((t) => t.title)).toEqual(['first', 'second']);
+    expect(tasks[0]!.status).toBe('pending');
+
+    await store.updateTask(t1.id, { status: 'done', redObserved: true, greenObserved: true, commitSha: 'abc' });
+    const updated = (await store.getTasks(run.id)).find((t) => t.id === t1.id)!;
+    expect(updated).toMatchObject({ status: 'done', redObserved: true, greenObserved: true, commitSha: 'abc' });
+  });
+});
+
 describe('InMemoryStore — processed events', () => {
   let store: InMemoryStore;
   beforeEach(() => {

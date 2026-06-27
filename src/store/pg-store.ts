@@ -10,12 +10,15 @@ import type {
   RecordArtifactInput,
   RecordLlmCallInput,
   RecordLlmCallResult,
+  RecordTaskInput,
   RecordTestRunInput,
   Run,
   RunKey,
   RunState,
   Store,
+  Task,
   TestRun,
+  UpdateTaskInput,
 } from './types.js';
 import type { TestFailureStage, TestRunStatus } from '../sandbox/types.js';
 
@@ -39,6 +42,21 @@ function mapTestRun(row: QueryResultRow): TestRun {
     command: row.command,
     failureStage: (row.failure_stage as TestFailureStage | null) ?? undefined,
     outputTail: row.output_tail ?? '',
+  };
+}
+
+function mapTask(row: QueryResultRow): Task {
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id),
+    idx: Number(row.idx),
+    title: row.title,
+    description: row.description,
+    acceptanceCriteria: (row.acceptance_criteria as string[]) ?? [],
+    status: row.status,
+    redObserved: row.red_observed === true,
+    greenObserved: row.green_observed === true,
+    commitSha: row.commit_sha ?? null,
   };
 }
 
@@ -287,5 +305,41 @@ export class PgStore implements Store {
       [runId, kind],
     );
     return rows[0] ? mapArtifact(rows[0]) : null;
+  }
+
+  async recordTask(input: RecordTaskInput): Promise<Task> {
+    const { rows } = await this.pool.query(
+      `INSERT INTO tasks (run_id, idx, title, description, acceptance_criteria)
+       VALUES ($1, $2, $3, $4, $5::jsonb)
+       RETURNING id, run_id, idx, title, description, acceptance_criteria,
+                 status, red_observed, green_observed, commit_sha`,
+      [input.runId, input.idx, input.title, input.description, JSON.stringify(input.acceptanceCriteria)],
+    );
+    return mapTask(rows[0]!);
+  }
+
+  async getTasks(runId: number): Promise<Task[]> {
+    const { rows } = await this.pool.query(
+      `SELECT id, run_id, idx, title, description, acceptance_criteria,
+              status, red_observed, green_observed, commit_sha
+         FROM tasks WHERE run_id = $1 ORDER BY idx`,
+      [runId],
+    );
+    return rows.map(mapTask);
+  }
+
+  async updateTask(taskId: number, patch: UpdateTaskInput): Promise<void> {
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    const add = (col: string, val: unknown): void => {
+      values.push(val);
+      sets.push(`${col} = $${values.length + 1}`);
+    };
+    if (patch.status !== undefined) add('status', patch.status);
+    if (patch.redObserved !== undefined) add('red_observed', patch.redObserved);
+    if (patch.greenObserved !== undefined) add('green_observed', patch.greenObserved);
+    if (patch.commitSha !== undefined) add('commit_sha', patch.commitSha);
+    if (sets.length === 0) return;
+    await this.pool.query(`UPDATE tasks SET ${sets.join(', ')} WHERE id = $1`, [taskId, ...values]);
   }
 }

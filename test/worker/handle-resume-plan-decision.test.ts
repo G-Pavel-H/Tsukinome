@@ -78,6 +78,8 @@ describe('handleResumePlanDecision', () => {
 
     expect(provider.requests).toHaveLength(0);
     expect((await store.getRunById(runId))!.state).toBe(RunState.Implementing);
+    // Implementation is chained.
+    expect((await store.claimNextJob())!.type).toBe('implement');
   });
 
   it('/abort closes the run cleanly', async () => {

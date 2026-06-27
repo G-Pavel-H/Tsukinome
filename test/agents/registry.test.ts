@@ -50,4 +50,12 @@ describe('role registry', () => {
     expect(ROLES['architect']!.tier).toBe('review');
     expect(ROLES['architect']!.schema).toBeDefined();
   });
+
+  it('defines the Phase 8 TDD-loop roles on the implementation tier', () => {
+    for (const name of ['decomposer', 'test-author', 'implementer', 'refactor']) {
+      expect(ROLES[name], name).toBeDefined();
+      expect(ROLES[name]!.tier, name).toBe('implementation');
+      expect(ROLES[name]!.schema, name).toBeDefined();
+    }
+  });
 });

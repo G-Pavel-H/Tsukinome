@@ -9,6 +9,7 @@ import type {
   ToolResultBlock,
 } from '../llm/types.js';
 import { AGENTS_DIR, ROLES } from './registry.js';
+import type { ModelTier } from '../llm/models.js';
 import type { AgentRunContext, RoleDefinition } from './types.js';
 
 /**
@@ -24,6 +25,8 @@ const CONSTITUTION = [
 
 export interface RunAgentInput {
   messages: LlmMessage[];
+  /** Override the role's default model tier (e.g. the Phase 8 escalation ladder → Opus). */
+  tierOverride?: ModelTier;
 }
 
 export interface RunAgentResult<T = unknown> {
@@ -64,6 +67,7 @@ export async function runAgent<T = unknown>(
 
   const system = instructionSystem(role);
   const outputFormat = role.schema ? zodOutputFormat(role.schema) : undefined;
+  const tier = input.tierOverride ?? role.tier;
   const messages: LlmMessage[] = [...input.messages];
 
   const hasTools = role.tools && role.tools.length > 0;
@@ -76,7 +80,7 @@ export async function runAgent<T = unknown>(
     const { response } = await ctx.gateway.call({
       runId: ctx.runId,
       role: roleName,
-      tier: role.tier,
+      tier,
       system,
       messages,
       maxTokens: role.maxTokens,

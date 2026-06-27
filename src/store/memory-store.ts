@@ -10,12 +10,15 @@ import {
   type RecordArtifactInput,
   type RecordLlmCallInput,
   type RecordLlmCallResult,
+  type RecordTaskInput,
   type RecordTestRunInput,
   type Run,
   type RunKey,
   type RunState,
   type Store,
+  type Task,
   type TestRun,
+  type UpdateTaskInput,
 } from './types.js';
 
 function runKeyOf(key: RunKey): string {
@@ -33,11 +36,13 @@ export class InMemoryStore implements Store {
   private testRuns: TestRun[] = [];
   private llmCalls: LlmCall[] = [];
   private artifacts: Artifact[] = [];
+  private tasks: Task[] = [];
   private nextJobId = 1;
   private nextRunId = 1;
   private nextTestRunId = 1;
   private nextLlmCallId = 1;
   private nextArtifactId = 1;
+  private nextTaskId = 1;
 
   async enqueueJob(input: { type: JobType; payload: JobPayload }): Promise<Job> {
     const job: Job = {
@@ -172,6 +177,36 @@ export class InMemoryStore implements Store {
   async getArtifact(runId: number, kind: ArtifactKind): Promise<Artifact | null> {
     const artifact = this.artifacts.find((a) => a.runId === runId && a.kind === kind);
     return artifact ? { ...artifact } : null;
+  }
+
+  async recordTask(input: RecordTaskInput): Promise<Task> {
+    const task: Task = {
+      id: this.nextTaskId++,
+      ...input,
+      acceptanceCriteria: [...input.acceptanceCriteria],
+      status: 'pending',
+      redObserved: false,
+      greenObserved: false,
+      commitSha: null,
+    };
+    this.tasks.push(task);
+    return { ...task };
+  }
+
+  async getTasks(runId: number): Promise<Task[]> {
+    return this.tasks
+      .filter((t) => t.runId === runId)
+      .sort((a, b) => a.idx - b.idx)
+      .map((t) => ({ ...t }));
+  }
+
+  async updateTask(taskId: number, patch: UpdateTaskInput): Promise<void> {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) return;
+    if (patch.status !== undefined) task.status = patch.status;
+    if (patch.redObserved !== undefined) task.redObserved = patch.redObserved;
+    if (patch.greenObserved !== undefined) task.greenObserved = patch.greenObserved;
+    if (patch.commitSha !== undefined) task.commitSha = patch.commitSha;
   }
 
   /** Test-only inspection helper (not part of the Store contract). */

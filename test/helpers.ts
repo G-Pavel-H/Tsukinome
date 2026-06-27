@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import type {
   CommitFileInput,
+  CommitFilesInput,
   GitHubClient,
   IssueInput,
   PostIssueCommentInput,
@@ -9,6 +10,8 @@ import type {
 import type { Logger } from '../src/log.js';
 import type { CodeChunk, CodeIndex } from '../src/index/types.js';
 import type { Checkout, CloneInput } from '../src/index/checkout.js';
+import type { OpenCodeSandboxFn } from '../src/sandbox/code-sandbox.js';
+import { FakeCodeSandbox } from './sandbox/fake-code-sandbox.js';
 
 export const silentLog: Logger = {
   info: () => {},
@@ -32,6 +35,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
   getIssue: ReturnType<typeof vi.fn>;
   getRepoLanguage: ReturnType<typeof vi.fn>;
   commitFile: ReturnType<typeof vi.fn>;
+  commitFiles: ReturnType<typeof vi.fn>;
 } {
   const calls: PostIssueCommentInput[] = [];
   const postIssueComment = vi.fn(async (input: PostIssueCommentInput) => {
@@ -50,6 +54,11 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
     commitSha: 'deadbeefcafe',
     branch: input.branch,
   }));
+  let commitSeq = 0;
+  const commitFiles = vi.fn(async (input: CommitFilesInput) => ({
+    commitSha: `commit${++commitSeq}`,
+    branch: input.branch,
+  }));
   return {
     calls,
     postIssueComment,
@@ -57,6 +66,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
     getIssue,
     getRepoLanguage,
     commitFile,
+    commitFiles,
   };
 }
 
@@ -71,6 +81,15 @@ export function fakeCodeIndex(chunks: CodeChunk[] = []): CodeIndex & {
     retrieve: vi.fn(async () => chunks),
     dropNamespace: vi.fn(async () => {}),
   };
+}
+
+/** An openSandbox fn that always yields the given FakeCodeSandbox (no E2B). */
+export function fakeOpenSandbox(sandbox: FakeCodeSandbox = new FakeCodeSandbox()): {
+  fn: OpenCodeSandboxFn;
+  sandbox: FakeCodeSandbox;
+} {
+  const fn: OpenCodeSandboxFn = async () => sandbox;
+  return { fn, sandbox };
 }
 
 /** A spy clone fn returning a stub checkout — no git involved. */

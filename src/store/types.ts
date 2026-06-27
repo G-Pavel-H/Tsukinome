@@ -38,7 +38,8 @@ export type JobType =
   | 'clarify'
   | 'resume_clarification'
   | 'produce_plan'
-  | 'resume_plan_decision';
+  | 'resume_plan_decision'
+  | 'implement';
 
 /** Payload for an `issue_opened` job — enough for the worker to act out-of-band. */
 export interface IssueOpenedPayload {
@@ -102,6 +103,14 @@ export interface ResumePlanDecisionPayload {
   commentBody: string;
 }
 
+/** Payload for an `implement` job (Phase 8 TDD execution loop). */
+export interface ImplementPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+}
+
 export type JobPayload =
   | IssueOpenedPayload
   | RunTestsPayload
@@ -109,7 +118,8 @@ export type JobPayload =
   | ClarifyPayload
   | ResumeClarificationPayload
   | ProducePlanPayload
-  | ResumePlanDecisionPayload;
+  | ResumePlanDecisionPayload
+  | ImplementPayload;
 
 export interface Job {
   id: number;
@@ -185,6 +195,33 @@ export interface RecordLlmCallResult {
   budgetRemainingNanoUsd: number;
 }
 
+/** Phase 8 decomposed task lifecycle. */
+export type TaskStatus = 'pending' | 'done' | 'escalated';
+
+export interface RecordTaskInput {
+  runId: number;
+  /** Order within the run (0-based). */
+  idx: number;
+  title: string;
+  description: string;
+  acceptanceCriteria: string[];
+}
+
+export interface Task extends RecordTaskInput {
+  id: number;
+  status: TaskStatus;
+  redObserved: boolean;
+  greenObserved: boolean;
+  commitSha: string | null;
+}
+
+export interface UpdateTaskInput {
+  status?: TaskStatus;
+  redObserved?: boolean;
+  greenObserved?: boolean;
+  commitSha?: string | null;
+}
+
 /** A committed artifact (e.g. the spec) — the source of truth, re-read by later phases. */
 export type ArtifactKind = 'spec' | 'plan';
 
@@ -227,4 +264,10 @@ export interface Store {
   /** Upsert an artifact keyed by (runId, kind). */
   recordArtifact(input: RecordArtifactInput): Promise<Artifact>;
   getArtifact(runId: number, kind: ArtifactKind): Promise<Artifact | null>;
+  /** Insert a decomposed task. */
+  recordTask(input: RecordTaskInput): Promise<Task>;
+  /** All tasks for a run, ordered by idx. */
+  getTasks(runId: number): Promise<Task[]>;
+  /** Patch a task's status / TDD observations / commit. */
+  updateTask(taskId: number, patch: UpdateTaskInput): Promise<void>;
 }
