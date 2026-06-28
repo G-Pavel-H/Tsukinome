@@ -10,6 +10,12 @@ export function specBranch(issueNumber: number): string {
   return `tsukinome/issue-${issueNumber}`;
 }
 
+/** Reverse of {@link specBranch}: the issue number a working branch belongs to, or null. */
+export function issueNumberFromBranch(ref: string): number | null {
+  const match = /^tsukinome\/issue-(\d+)$/.exec(ref);
+  return match ? Number(match[1]) : null;
+}
+
 export function specPath(issueNumber: number): string {
   return `.tsukinome/${issueNumber}/spec.md`;
 }

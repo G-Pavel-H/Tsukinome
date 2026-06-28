@@ -40,7 +40,8 @@ export type JobType =
   | 'produce_plan'
   | 'resume_plan_decision'
   | 'implement'
-  | 'review';
+  | 'review'
+  | 'fix';
 
 /** Payload for an `issue_opened` job — enough for the worker to act out-of-band. */
 export interface IssueOpenedPayload {
@@ -120,6 +121,22 @@ export interface ReviewPayload {
   issueNumber: number;
 }
 
+/** Payload for a `fix` job (Phase 10 PR review-comment fix loop). */
+export interface FixPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  /** The run's issue, derived from the PR head branch. */
+  issueNumber: number;
+  prNumber: number;
+  /** The maintainer's comment — untrusted DATA, triaged then acted on. */
+  commentBody: string;
+  /** File the inline comment is attached to (scopes the fix). */
+  filePath?: string;
+  /** Set for inline comments → reply on that thread. */
+  reviewCommentId?: number;
+}
+
 export type JobPayload =
   | IssueOpenedPayload
   | RunTestsPayload
@@ -129,7 +146,8 @@ export type JobPayload =
   | ProducePlanPayload
   | ResumePlanDecisionPayload
   | ImplementPayload
-  | ReviewPayload;
+  | ReviewPayload
+  | FixPayload;
 
 export interface Job {
   id: number;

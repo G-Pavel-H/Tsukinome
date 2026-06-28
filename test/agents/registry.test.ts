@@ -64,4 +64,10 @@ describe('role registry', () => {
     expect(ROLES['reviewer']!.tier).toBe('review');
     expect(ROLES['reviewer']!.schema).toBeDefined();
   });
+
+  it('defines the Phase 10 fix-triage role on the triage tier', () => {
+    expect(ROLES['fix-triage']).toBeDefined();
+    expect(ROLES['fix-triage']!.tier).toBe('triage');
+    expect(ROLES['fix-triage']!.schema).toBeDefined();
+  });
 });

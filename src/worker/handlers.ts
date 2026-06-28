@@ -3,6 +3,7 @@ import type { Logger } from '../log.js';
 import {
   RunState,
   type ClarifyPayload,
+  type FixPayload,
   type ImplementPayload,
   type Job,
   type ProducePlanPayload,
@@ -21,7 +22,22 @@ import { runAgent } from '../agents/runner.js';
 import { decompose, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
 import { renderEscalationComment, renderImplementationDoneComment } from '../pipeline/implement.js';
 import { renderPrBody, renderPrTitle, renderReviewedComment } from '../pipeline/review.js';
-import type { Clarification, IntakeResult, Plan, Review, Spec } from '../pipeline/schemas.js';
+import {
+  FIX_ROUND_CAP,
+  renderFixCapComment,
+  renderFixClarifyComment,
+  renderFixDoneComment,
+  renderFixEscalationComment,
+  renderFixReworkComment,
+} from '../pipeline/fix.js';
+import type {
+  Clarification,
+  FixTriage,
+  IntakeResult,
+  Plan,
+  Review,
+  Spec,
+} from '../pipeline/schemas.js';
 import { renderSpecComment, renderSpecMarkdown } from '../pipeline/spec.js';
 import {
   CLARIFY_QUESTION_CAP,
@@ -992,6 +1008,147 @@ export async function handleReview(job: Job, deps: SpecHandlerDeps): Promise<voi
       await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
       await store.updateRunState(run.id, RunState.Failed);
       log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during review');
+      return;
+    }
+    throw err;
+  }
+}
+
+const FIX_BUDGET_COMMENT =
+  '⏸️ **Stopped — budget reached.** This run hit its per-run cost ceiling. Handing back to a human.';
+
+/**
+ * Handle a `fix` job (Phase 10): a maintainer left a PR review comment while parked at
+ * `AwaitingPrReview`. Triage it — a vague comment gets one clarifying question, a rework-sized
+ * request routes back to the plan gate, and an actionable one is fixed **test-first** (reusing the
+ * Phase-8 TDD loop) and pushed as a new commit with a thread reply. Bounded by FIX_ROUND_CAP and
+ * the per-run budget; exceeding either escalates to a human. The sandbox is always closed.
+ */
+export async function handleFix(job: Job, deps: ImplementHandlerDeps): Promise<void> {
+  const { store, github, gateway, sandboxProvider, openSandbox, log } = deps;
+  const { installationId, owner, repo, issueNumber, prNumber, commentBody, filePath, reviewCommentId } =
+    job.payload as FixPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const { run } = await store.findOrCreateRun(
+    { installationId, owner, repo, issueNumber },
+    RunState.Received,
+  );
+
+  if (run.state !== RunState.AwaitingPrReview) {
+    log.info({ jobId: job.id, runId: run.id, state: run.state }, 'Not awaiting PR review; skipping fix');
+    return;
+  }
+
+  // Reply on the inline thread when we have one, else on the PR conversation.
+  const reply = async (body: string): Promise<void> => {
+    if (reviewCommentId !== undefined) {
+      await github.replyToReviewComment({ installationId, owner, repo, pullNumber: prNumber, commentId: reviewCommentId, body });
+    } else {
+      await github.postIssueComment({ installationId, owner, repo, issueNumber: prNumber, body });
+    }
+  };
+
+  const ctx = { runId: run.id, gateway, log };
+
+  try {
+    const [specArtifact, planArtifact] = [
+      await store.getArtifact(run.id, 'spec'),
+      await store.getArtifact(run.id, 'plan'),
+    ];
+
+    const triage = await runAgent<FixTriage>(
+      'fix-triage',
+      {
+        messages: [
+          {
+            role: 'user',
+            content:
+              `Review comment:\n${commentBody}\n\n${filePath ? `File: ${filePath}\n\n` : ''}` +
+              `Spec:\n${specArtifact?.content ?? '(unavailable)'}`,
+          },
+        ],
+      },
+      ctx,
+    );
+    const kind = triage.output!.kind;
+
+    if (kind === 'vague') {
+      await reply(renderFixClarifyComment(triage.output!.reason));
+      log.info({ runId: run.id, repo: repoLabel }, 'Vague review comment; asked for clarification');
+      return; // stay parked; no round consumed
+    }
+
+    if (kind === 'rework') {
+      await reply(renderFixReworkComment());
+      await store.updateRunState(run.id, RunState.AwaitingPlanApproval);
+      await store.enqueueJob({
+        type: 'resume_plan_decision',
+        payload: { installationId, owner, repo, issueNumber, commentBody },
+      });
+      log.info({ runId: run.id, repo: repoLabel }, 'Rework request; routed back to the plan gate');
+      return;
+    }
+
+    // actionable — bounded by the per-PR fix-round cap.
+    const rounds = (run.context.fix as { rounds?: number } | undefined)?.rounds ?? 0;
+    if (rounds >= FIX_ROUND_CAP) {
+      await reply(renderFixCapComment());
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel, rounds }, 'Fix-round cap reached; escalating');
+      return;
+    }
+
+    const token = await github.getInstallationToken({ installationId, owner, repo });
+    const sandbox = await openSandbox(
+      { token, owner, repo, ref: specBranch(issueNumber) },
+      { sandboxProvider, log },
+    );
+    try {
+      const task: TaskSpec = {
+        id: 'FIX',
+        title: 'Address review feedback',
+        description: `A maintainer left this review comment${filePath ? ` on ${filePath}` : ''}:\n${commentBody}`,
+        acceptanceCriteria: [`The concern in the review comment is resolved: ${commentBody}`],
+      };
+      const outcome = await runTaskTdd(task, {
+        sandbox,
+        gateway,
+        runId: run.id,
+        log,
+        specMarkdown: specArtifact?.content ?? '',
+        planMarkdown: planArtifact?.content ?? '',
+        affectedPaths: filePath ? [filePath] : [],
+      });
+
+      if (outcome.status === 'escalated') {
+        await reply(renderFixEscalationComment());
+        await store.updateRunState(run.id, RunState.Failed);
+        log.warn({ runId: run.id, repo: repoLabel, stage: outcome.stage }, 'Fix could not land; escalating');
+        return;
+      }
+
+      const changed = await sandbox.readFiles(outcome.changedPaths);
+      const commit = await commitTaskFiles(github, {
+        installationId,
+        owner,
+        repo,
+        issueNumber,
+        files: changed,
+        message: `Tsukinome: address review feedback (#${issueNumber})`,
+      });
+      await store.updateRunContext(run.id, { ...run.context, fix: { rounds: rounds + 1 } });
+      await reply(renderFixDoneComment(commit.commitSha));
+      // Stay AwaitingPrReview — the pushed commit re-runs CI and invites another look.
+      log.info({ runId: run.id, repo: repoLabel, round: rounds + 1 }, 'Pushed a test-first fix');
+    } finally {
+      await sandbox.close();
+    }
+  } catch (err) {
+    if (err instanceof BudgetExhaustedError) {
+      await reply(FIX_BUDGET_COMMENT);
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: run budget exhausted during fix');
       return;
     }
     throw err;

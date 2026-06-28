@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   clarificationSchema,
   fileSetSchema,
+  fixTriageSchema,
   intakeSchema,
   planSchema,
   reviewSchema,
@@ -120,5 +121,14 @@ export const ROLES: Record<string, RoleDefinition> = {
     tier: 'review',
     schema: reviewSchema,
     maxTokens: 4096,
+  },
+
+  // --- Phase 10 PR fix loop ---
+  'fix-triage': {
+    name: 'fix-triage',
+    instructionFile: 'fix-triage.md',
+    tier: 'triage',
+    schema: fixTriageSchema,
+    maxTokens: 512,
   },
 };

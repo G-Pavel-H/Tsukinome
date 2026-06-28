@@ -199,3 +199,86 @@ describe('createApp — issue_comment.created (clarification resume)', () => {
     expect(await store.claimNextJob()).toBeNull();
   });
 });
+
+function reviewCommentPayload(opts: { ref?: string; userType?: 'User' | 'Bot' } = {}) {
+  return {
+    action: 'created',
+    comment: {
+      id: 1001,
+      body: 'handle the empty input case',
+      path: 'src/add.ts',
+      user: { login: 'maintainer', type: opts.userType ?? 'User' },
+    },
+    pull_request: { number: 7, head: { ref: opts.ref ?? 'tsukinome/issue-42' } },
+    repository: { full_name: 'acme/widgets', name: 'widgets', owner: { login: 'acme' } },
+    installation: { id: 7 },
+  } as const;
+}
+
+function reviewPayload(opts: { state?: string; userType?: 'User' | 'Bot' } = {}) {
+  return {
+    action: 'submitted',
+    review: {
+      body: 'please address these',
+      state: opts.state ?? 'changes_requested',
+      user: { login: 'maintainer', type: opts.userType ?? 'User' },
+    },
+    pull_request: { number: 7, head: { ref: 'tsukinome/issue-42' } },
+    repository: { full_name: 'acme/widgets', name: 'widgets', owner: { login: 'acme' } },
+    installation: { id: 7 },
+  } as const;
+}
+
+describe('createApp — PR review fix loop', () => {
+  let store: InMemoryStore;
+  let probot: Probot;
+  beforeEach(async () => {
+    store = new InMemoryStore();
+    probot = buildProbot(store);
+  });
+
+  async function parkPr(): Promise<void> {
+    const { run } = await store.findOrCreateRun(PARKED_KEY, RunState.Received);
+    await store.updateRunState(run.id, RunState.AwaitingPrReview);
+  }
+
+  it('enqueues a fix job from an inline review comment on a parked PR', async () => {
+    await parkPr();
+    await probot.receive({ id: 'rc-1', name: 'pull_request_review_comment', payload: reviewCommentPayload() as never });
+
+    const job = await store.claimNextJob();
+    expect(job!.type).toBe('fix');
+    expect(job!.payload).toMatchObject({
+      issueNumber: 42,
+      prNumber: 7,
+      commentBody: 'handle the empty input case',
+      filePath: 'src/add.ts',
+      reviewCommentId: 1001,
+    });
+  });
+
+  it('ignores bot review comments and non-tsukinome branches', async () => {
+    await parkPr();
+    await probot.receive({ id: 'rc-bot', name: 'pull_request_review_comment', payload: reviewCommentPayload({ userType: 'Bot' }) as never });
+    await probot.receive({ id: 'rc-other', name: 'pull_request_review_comment', payload: reviewCommentPayload({ ref: 'feature/x' }) as never });
+    expect(await store.claimNextJob()).toBeNull();
+  });
+
+  it('enqueues a fix from a changes-requested review but ignores an approval', async () => {
+    await parkPr();
+    await probot.receive({ id: 'rv-approve', name: 'pull_request_review', payload: reviewPayload({ state: 'approved' }) as never });
+    expect(await store.claimNextJob()).toBeNull();
+
+    await probot.receive({ id: 'rv-changes', name: 'pull_request_review', payload: reviewPayload() as never });
+    const job = await store.claimNextJob();
+    expect(job!.type).toBe('fix');
+    expect(job!.payload).toMatchObject({ issueNumber: 42, prNumber: 7, commentBody: 'please address these' });
+  });
+
+  it('ignores review comments when the run is not awaiting PR review', async () => {
+    const { run } = await store.findOrCreateRun(PARKED_KEY, RunState.Received);
+    await store.updateRunState(run.id, RunState.Implementing);
+    await probot.receive({ id: 'rc-2', name: 'pull_request_review_comment', payload: reviewCommentPayload() as never });
+    expect(await store.claimNextJob()).toBeNull();
+  });
+});

@@ -7,6 +7,7 @@ import type { CodeIndex } from '../index/types.js';
 import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import {
   handleClarify,
+  handleFix,
   handleImplement,
   handleIssueOpened,
   handleProducePlan,
@@ -56,6 +57,9 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
       return;
     case 'review':
       await handleReview(job, deps);
+      return;
+    case 'fix':
+      await handleFix(job, deps);
       return;
     case 'run_tests':
       await handleRunTests(job, deps);

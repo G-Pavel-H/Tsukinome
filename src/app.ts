@@ -1,6 +1,7 @@
 import type { Probot } from 'probot';
 import type { Logger } from './log.js';
 import { RunState, type Store } from './store/types.js';
+import { issueNumberFromBranch } from './github/integrator.js';
 
 export interface AppDeps {
   store: Store;
@@ -118,15 +119,63 @@ export function createApp(deps: AppDeps): (probot: Probot) => void {
       );
     });
 
+    // Phase 10: an inline review comment on a Tsukinome PR becomes a bounded, test-first fix.
     probot.on('pull_request_review_comment.created', async (context) => {
-      log.info(
-        {
-          event: 'pull_request_review_comment.created',
-          repo: context.payload.repository.full_name,
-          pr: context.payload.pull_request.number,
+      const deliveryId = context.id;
+      const { repository, pull_request: pr, comment, installation } = context.payload;
+
+      if (comment.user?.type === 'Bot') return; // never act on our own replies
+      const issueNumber = issueNumberFromBranch(pr.head.ref);
+      const installationId = installation?.id;
+      if (issueNumber === null || installationId === undefined) return;
+
+      if (!(await store.tryMarkEventProcessed(deliveryId))) return;
+
+      const key = { installationId, owner: repository.owner.login, repo: repository.name, issueNumber };
+      const run = await store.getRun(key);
+      if (run?.state !== RunState.AwaitingPrReview) {
+        log.info({ deliveryId, repo: repository.full_name, pr: pr.number, state: run?.state }, 'PR comment not on a parked run; ignoring');
+        return;
+      }
+
+      await store.enqueueJob({
+        type: 'fix',
+        payload: {
+          ...key,
+          prNumber: pr.number,
+          commentBody: comment.body ?? '',
+          filePath: comment.path,
+          reviewCommentId: comment.id,
         },
-        'Webhook received: pull_request_review_comment.created (no-op in Phase 1)',
-      );
+      });
+      log.info({ deliveryId, repo: repository.full_name, pr: pr.number, runId: run.id }, 'Enqueued fix from review comment');
+    });
+
+    // Phase 10: a "changes requested" review on a Tsukinome PR also triggers the fix loop.
+    probot.on('pull_request_review.submitted', async (context) => {
+      const deliveryId = context.id;
+      const { repository, pull_request: pr, review, installation } = context.payload;
+
+      if (review.state !== 'changes_requested') return;
+      if (review.user?.type === 'Bot') return;
+      const issueNumber = issueNumberFromBranch(pr.head.ref);
+      const installationId = installation?.id;
+      if (issueNumber === null || installationId === undefined) return;
+
+      if (!(await store.tryMarkEventProcessed(deliveryId))) return;
+
+      const key = { installationId, owner: repository.owner.login, repo: repository.name, issueNumber };
+      const run = await store.getRun(key);
+      if (run?.state !== RunState.AwaitingPrReview) {
+        log.info({ deliveryId, repo: repository.full_name, pr: pr.number, state: run?.state }, 'Review not on a parked run; ignoring');
+        return;
+      }
+
+      await store.enqueueJob({
+        type: 'fix',
+        payload: { ...key, prNumber: pr.number, commentBody: review.body ?? '' },
+      });
+      log.info({ deliveryId, repo: repository.full_name, pr: pr.number, runId: run.id }, 'Enqueued fix from changes-requested review');
     });
   };
 }

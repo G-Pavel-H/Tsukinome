@@ -83,6 +83,16 @@ export interface PullRequestResult {
   url: string;
 }
 
+export interface ReplyToReviewCommentInput {
+  installationId: number;
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  /** The review comment to reply under (its thread). */
+  commentId: number;
+  body: string;
+}
+
 /**
  * The GitHub actions the worker needs. Kept narrow so the worker depends on an
  * interface, not Octokit — tests inject a spy, production injects Probot auth.
@@ -105,6 +115,8 @@ export interface GitHubClient {
   compareDiff(input: CompareDiffInput): Promise<string>;
   /** Open a PR (or reuse the open one for `head`). Base defaults to the default branch. */
   openPullRequest(input: OpenPullRequestInput): Promise<PullRequestResult>;
+  /** Reply under an existing PR review comment's thread. */
+  replyToReviewComment(input: ReplyToReviewCommentInput): Promise<void>;
 }
 
 /**
@@ -272,6 +284,17 @@ export function createProbotGitHubClient(probot: Probot): GitHubClient {
 
       const { data: pr } = await octokit.rest.pulls.create({ owner, repo, head, base, title, body });
       return { number: pr.number, url: pr.html_url };
+    },
+
+    async replyToReviewComment(input: ReplyToReviewCommentInput): Promise<void> {
+      const octokit = await probot.auth(input.installationId);
+      await octokit.rest.pulls.createReplyForReviewComment({
+        owner: input.owner,
+        repo: input.repo,
+        pull_number: input.pullNumber,
+        comment_id: input.commentId,
+        body: input.body,
+      });
     },
   };
 }

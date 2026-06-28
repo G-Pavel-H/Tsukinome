@@ -6,6 +6,7 @@ import type {
   IssueInput,
   OpenPullRequestInput,
   PostIssueCommentInput,
+  ReplyToReviewCommentInput,
   RepoLanguageInput,
 } from '../src/github/client.js';
 import type { Logger } from '../src/log.js';
@@ -40,6 +41,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
   commitFiles: ReturnType<typeof vi.fn>;
   compareDiff: ReturnType<typeof vi.fn>;
   openPullRequest: ReturnType<typeof vi.fn>;
+  replyToReviewComment: ReturnType<typeof vi.fn>;
 } {
   const calls: PostIssueCommentInput[] = [];
   const postIssueComment = vi.fn(async (input: PostIssueCommentInput) => {
@@ -68,6 +70,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
     number: 7,
     url: 'https://github.com/acme/widgets/pull/7',
   }));
+  const replyToReviewComment = vi.fn(async (_input: ReplyToReviewCommentInput) => {});
   return {
     calls,
     postIssueComment,
@@ -78,6 +81,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
     commitFiles,
     compareDiff,
     openPullRequest,
+    replyToReviewComment,
   };
 }
 

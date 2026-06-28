@@ -101,3 +101,10 @@ export const reviewSchema = z.object({
   ),
 });
 export type Review = z.infer<typeof reviewSchema>;
+
+/** Fix-triage output (Phase 10): how to handle a PR review comment. */
+export const fixTriageSchema = z.object({
+  kind: z.enum(['actionable', 'vague', 'rework']),
+  reason: z.string(),
+});
+export type FixTriage = z.infer<typeof fixTriageSchema>;
