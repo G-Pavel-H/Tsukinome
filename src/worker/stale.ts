@@ -15,6 +15,7 @@ export const STALE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 export const STALE_STATES: RunState[] = [
   RunState.AwaitingClarification,
   RunState.AwaitingPlanApproval,
+  RunState.AwaitingImplHelp,
   RunState.AwaitingPrReview,
 ];
 

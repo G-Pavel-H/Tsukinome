@@ -9,6 +9,7 @@ import {
   type ProducePlanPayload,
   type ProduceSpecPayload,
   type ResumeClarificationPayload,
+  type ResumeImplementationPayload,
   type ResumePlanDecisionPayload,
   type ReviewPayload,
   type RunTestsPayload,
@@ -20,7 +21,14 @@ import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
 import { decompose, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
-import { renderEscalationComment, renderImplementationDoneComment } from '../pipeline/implement.js';
+import {
+  IMPL_HELP_CAP,
+  renderEscalationComment,
+  renderImplAbortComment,
+  renderImplementationDoneComment,
+  renderImplHelpAckComment,
+  renderImplHelpExhaustedComment,
+} from '../pipeline/implement.js';
 import { renderPrBody, renderPrTitle, renderReviewedComment } from '../pipeline/review.js';
 import { renderCostSummary } from '../pipeline/cost.js';
 import {
@@ -322,6 +330,22 @@ function readRunContext(context: Record<string, unknown>): {
   const planData = context.planData as Plan | undefined;
   const clarification = context.clarification as ClarificationContext | undefined;
   return { spec, specData, planData, questions: clarification?.questions ?? [] };
+}
+
+/** Persisted state of the implementation "stuck" gate (survives the suspend across a human reply). */
+interface ImplHelp {
+  /** DB id of the task that stalled. */
+  taskId: number;
+  stage?: 'test' | 'impl';
+  lastFailureOutput?: string;
+  /** How many human-guided retries have been consumed. */
+  rounds: number;
+  /** The maintainer's latest guidance, threaded into the retried task (cleared once applied). */
+  guidance?: string;
+}
+
+function readImplHelp(context: Record<string, unknown>): ImplHelp | undefined {
+  return context.implHelp as ImplHelp | undefined;
 }
 
 /**
@@ -897,7 +921,10 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
         description: task.description,
         acceptanceCriteria: task.acceptanceCriteria,
       };
-      const outcome = await runTaskTdd(taskSpec, tddCtx);
+      // Apply maintainer guidance from the "stuck" gate only to the task it was given for.
+      const implHelp = readImplHelp(run.context);
+      const guidance = implHelp && implHelp.taskId === task.id ? implHelp.guidance : undefined;
+      const outcome = await runTaskTdd(taskSpec, { ...tddCtx, humanGuidance: guidance });
 
       if (outcome.status === 'escalated') {
         await store.updateTask(task.id, {
@@ -905,15 +932,28 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
           redObserved: outcome.redObserved,
           greenObserved: outcome.greenObserved,
         });
+        // Park at the human-help gate instead of dead-ending: persist where we stalled (and the
+        // rounds consumed so far) so a maintainer reply can resume with guidance. Clear any spent
+        // guidance — this attempt used it and still failed.
+        await store.updateRunContext(run.id, {
+          ...run.context,
+          implHelp: {
+            taskId: task.id,
+            stage: outcome.stage,
+            lastFailureOutput: outcome.lastFailureOutput,
+            rounds: implHelp?.rounds ?? 0,
+            guidance: undefined,
+          } satisfies ImplHelp,
+        });
         await github.postIssueComment({
           installationId,
           owner,
           repo,
           issueNumber,
-          body: renderEscalationComment(task.title, outcome.stage),
+          body: renderEscalationComment(task.title, outcome.stage, outcome.lastFailureOutput),
         });
-        await store.updateRunState(run.id, RunState.Failed);
-        log.warn({ runId: run.id, repo: repoLabel, task: task.id, stage: outcome.stage }, 'Task escalated to human');
+        await store.updateRunState(run.id, RunState.AwaitingImplHelp);
+        log.warn({ runId: run.id, repo: repoLabel, task: task.id, stage: outcome.stage }, 'Task stalled; parked at human-help gate');
         return;
       }
 
@@ -933,6 +973,11 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
         greenObserved: true,
         commitSha: commit.commitSha,
       });
+      // A previously-stalled task landed — clear the gate state so it doesn't linger.
+      if (implHelp && implHelp.taskId === task.id) {
+        run.context.implHelp = undefined;
+        await store.updateRunContext(run.id, { ...run.context });
+      }
       log.info({ runId: run.id, repo: repoLabel, task: task.id }, 'Task done; committed');
     }
 
@@ -957,6 +1002,63 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
   } finally {
     await sandbox.close();
   }
+}
+
+/**
+ * Handle a `resume_implementation` job: a maintainer replied at the "stuck" gate. `/abort` closes
+ * the run; any other reply is guidance — persisted in context and threaded into the retried task,
+ * then the run re-enters the (restartable) implementation loop. Bounded by `IMPL_HELP_CAP` guided
+ * rounds, after which it stops for real. The red→green gate still holds on every retry, so guidance
+ * can steer *which* tests exist but never force a non-green commit.
+ */
+export async function handleResumeImplementation(
+  job: Job,
+  deps: ImplementHandlerDeps,
+): Promise<void> {
+  const { store, github, log } = deps;
+  const { installationId, owner, repo, issueNumber, commentBody } =
+    job.payload as ResumeImplementationPayload;
+  const repoLabel = `${owner}/${repo}`;
+
+  const run = await store.getRun({ installationId, owner, repo, issueNumber });
+  if (!run || run.state !== RunState.AwaitingImplHelp) {
+    log.info({ jobId: job.id, runId: run?.id, state: run?.state }, 'Not awaiting impl help; skipping');
+    return;
+  }
+
+  const post = (body: string) =>
+    github.postIssueComment({ installationId, owner, repo, issueNumber, body });
+
+  // `/abort` at the gate closes the run.
+  if (commentBody.trim().toLowerCase().startsWith('/abort')) {
+    await post(renderImplAbortComment());
+    await store.updateRunState(run.id, RunState.Aborted);
+    log.info({ runId: run.id, repo: repoLabel }, 'Human aborted at the impl-help gate');
+    return;
+  }
+
+  const implHelp = readImplHelp(run.context);
+  const nextRound = (implHelp?.rounds ?? 0) + 1;
+  if (nextRound > IMPL_HELP_CAP) {
+    await post(renderImplHelpExhaustedComment());
+    await store.updateRunState(run.id, RunState.Failed);
+    log.warn({ runId: run.id, repo: repoLabel, rounds: nextRound }, 'Impl-help retries exhausted; failing');
+    return;
+  }
+
+  // Persist the guidance + bumped round, then re-enter the restartable implementation loop.
+  await store.updateRunContext(run.id, {
+    ...run.context,
+    implHelp: {
+      ...(implHelp ?? { taskId: -1, rounds: 0 }),
+      rounds: nextRound,
+      guidance: commentBody,
+    } satisfies ImplHelp,
+  });
+  await store.updateRunState(run.id, RunState.Implementing);
+  await store.enqueueJob({ type: 'implement', payload: { installationId, owner, repo, issueNumber } });
+  await post(renderImplHelpAckComment());
+  log.info({ runId: run.id, repo: repoLabel, round: nextRound }, 'Resuming implementation with human guidance');
 }
 
 /**
@@ -1156,7 +1258,7 @@ export async function handleFix(job: Job, deps: ImplementHandlerDeps): Promise<v
       });
 
       if (outcome.status === 'escalated') {
-        await reply(renderFixEscalationComment());
+        await reply(renderFixEscalationComment(outcome.lastFailureOutput));
         await store.updateRunState(run.id, RunState.Failed);
         log.warn({ runId: run.id, repo: repoLabel, stage: outcome.stage }, 'Fix could not land; escalating');
         return;

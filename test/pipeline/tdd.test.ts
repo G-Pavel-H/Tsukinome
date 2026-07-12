@@ -75,14 +75,52 @@ describe('runTaskTdd', () => {
   it('escalates (no infinite loop) when the implementation never goes green', async () => {
     const provider = new FakeLlmProvider();
     provider.always = textResponse(files('src/add.ts', 'impl')); // also serves the test-author
-    // test-author: red once; then implementer attempts all fail.
-    const sandbox = new FakeCodeSandbox(['failed', 'failed', 'failed', 'failed']);
+    // test-author: red once; then every implementer attempt (whole ladder) fails.
+    const sandbox = new FakeCodeSandbox([
+      'failed',
+      ...(Array(SONNET_ATTEMPTS + OPUS_ATTEMPTS).fill('failed') as TestRunStatus[]),
+    ]);
 
     const outcome = await runTaskTdd(task, await ctx(store, provider, sandbox));
 
     expect(outcome.status).toBe('escalated');
     expect(outcome.stage).toBe('impl');
     expect(outcome.redObserved).toBe(true);
+  });
+
+  it('feeds the previous failing test output back to the implementer on retry', async () => {
+    const provider = new FakeLlmProvider([
+      textResponse(files('src/add.test.ts', 'test')), // test-author → red
+      textResponse(files('src/add.ts', 'impl-1')), // implementer attempt 1 → still failing
+      textResponse(files('src/add.ts', 'impl-2')), // implementer attempt 2 → green
+    ]);
+    // author red (call 1) → impl attempt 1 fails (call 2) → impl attempt 2 passes (call 3)
+    const sandbox = new FakeCodeSandbox(['failed', 'failed', 'passed']);
+
+    const outcome = await runTaskTdd(task, await ctx(store, provider, sandbox));
+    expect(outcome.status).toBe('done');
+
+    // Requests carrying the failing tests are the implementer's; the 2nd must include
+    // attempt 1's failure output (the 2nd runTests call → marker "#2").
+    const implReqs = provider.requests.filter((r) => JSON.stringify(r).includes('Failing tests:'));
+    expect(implReqs.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(implReqs[0])).not.toContain('vitest-failure'); // 1st attempt: no prior output
+    expect(JSON.stringify(implReqs[1])).toContain('vitest-failure-#2'); // retry sees the failure
+  });
+
+  it('carries the last failure output on an impl escalation', async () => {
+    const provider = new FakeLlmProvider();
+    provider.always = textResponse(files('src/add.ts', 'impl'));
+    const sandbox = new FakeCodeSandbox([
+      'failed',
+      ...(Array(SONNET_ATTEMPTS + OPUS_ATTEMPTS).fill('failed') as TestRunStatus[]),
+    ]);
+
+    const outcome = await runTaskTdd(task, await ctx(store, provider, sandbox));
+
+    expect(outcome.status).toBe('escalated');
+    expect(outcome.stage).toBe('impl');
+    expect(outcome.lastFailureOutput).toContain('vitest-failure');
   });
 
   it('promotes Sonnet → Opus on the escalation ladder before giving up', async () => {

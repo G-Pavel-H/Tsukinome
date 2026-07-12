@@ -113,6 +113,15 @@ export function createApp(deps: AppDeps): (probot: Probot) => void {
         return;
       }
 
+      if (run?.state === RunState.AwaitingImplHelp) {
+        await store.enqueueJob({ type: 'resume_implementation', payload: { ...key, commentBody } });
+        log.info(
+          { deliveryId, repo: repository.full_name, issue: issueNumber, runId: run.id },
+          'Enqueued resume_implementation job',
+        );
+        return;
+      }
+
       log.info(
         { deliveryId, repo: repository.full_name, issue: issueNumber, state: run?.state },
         'Comment not on a run awaiting a human gate; ignoring',

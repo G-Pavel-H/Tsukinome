@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { handleImplement, type ImplementHandlerDeps } from '../../src/worker/handlers.js';
+import {
+  handleImplement,
+  handleResumeImplementation,
+  type ImplementHandlerDeps,
+} from '../../src/worker/handlers.js';
+import { SONNET_ATTEMPTS, OPUS_ATTEMPTS } from '../../src/pipeline/tdd.js';
+import { IMPL_HELP_CAP } from '../../src/pipeline/implement.js';
 import { LlmGateway } from '../../src/llm/gateway.js';
 import { InMemoryStore } from '../../src/store/memory-store.js';
 import { RunState, type Job } from '../../src/store/types.js';
@@ -101,26 +107,109 @@ describe('handleImplement', () => {
     expect(next!.type).toBe('review');
   });
 
-  it('escalates to a human (Failed) when a task cannot be completed, instead of looping', async () => {
-    const runId = await seedImplementingRun(store);
-    // One task; test goes red, but the implementation never goes green across the ladder.
+  const implAttempts = SONNET_ATTEMPTS + OPUS_ATTEMPTS;
+  const stalledScripts = () => {
     const provider = new FakeLlmProvider([
       textResponse(taskList('add')),
       textResponse(files('src/add.test.ts', 't')), // test-author → red
-      textResponse(files('src/add.ts', 'i1')), // impl attempt 1 (sonnet)
-      textResponse(files('src/add.ts', 'i2')), // impl attempt 2 (sonnet)
-      textResponse(files('src/add.ts', 'i3')), // impl attempt 3 (opus)
+      // one implementer response per ladder rung (all fail)
+      ...Array.from({ length: implAttempts }, (_, i) => textResponse(files('src/add.ts', `i${i + 1}`))),
     ]);
-    const sandbox = new FakeCodeSandbox(['failed', 'failed', 'failed', 'failed'] as TestRunStatus[]);
+    const sandbox = new FakeCodeSandbox([
+      'failed',
+      ...(Array(implAttempts).fill('failed') as TestRunStatus[]),
+    ]);
+    return { provider, sandbox };
+  };
+
+  it('parks at the human-help gate (not Failed) when a task cannot be completed, instead of looping', async () => {
+    const runId = await seedImplementingRun(store);
+    const { provider, sandbox } = stalledScripts();
     const d = deps(store, provider, sandbox);
 
     await handleImplement(job, d);
 
-    expect((await store.getRunById(runId))!.state).toBe(RunState.Failed);
+    const run = (await store.getRunById(runId))!;
+    expect(run.state).toBe(RunState.AwaitingImplHelp); // paused for guidance, not dead-ended
     expect(d.github.postIssueComment).toHaveBeenCalled();
     expect(d.github.commitFiles).not.toHaveBeenCalled();
     expect((await store.getTasks(runId))[0]!.status).toBe('escalated');
+    // The gate remembers where it stalled so a reply can resume it.
+    const implHelp = run.context.implHelp as { taskId: number; rounds: number } | undefined;
+    expect(implHelp?.taskId).toBe((await store.getTasks(runId))[0]!.id);
+    expect(implHelp?.rounds).toBe(0);
     expect(sandbox.closed).toBe(1);
+  });
+
+  const resumeJob = (commentBody: string): Job => ({
+    id: 31,
+    type: 'resume_implementation',
+    status: 'in_progress',
+    attempts: 1,
+    payload: { installationId: 7, owner: 'acme', repo: 'widgets', issueNumber: 42, commentBody },
+  });
+
+  it('resumes with human guidance and lands the task green', async () => {
+    const runId = await seedImplementingRun(store);
+    // First pass stalls → parks at the gate.
+    const first = stalledScripts();
+    await handleImplement(job, deps(store, first.provider, first.sandbox));
+    expect((await store.getRunById(runId))!.state).toBe(RunState.AwaitingImplHelp);
+
+    // Human replies with guidance → enqueues a fresh implement job.
+    const resumeDeps = deps(store, new FakeLlmProvider(), new FakeCodeSandbox());
+    await handleResumeImplementation(resumeJob('drop the bogus AC and try again'), resumeDeps);
+    const run = (await store.getRunById(runId))!;
+    expect(run.state).toBe(RunState.Implementing);
+    expect((run.context.implHelp as { rounds: number }).rounds).toBe(1);
+    const queued = await store.claimNextJob();
+    expect(queued!.type).toBe('implement');
+
+    // The retried implement run greens the task (test-author red → impl green → refactor).
+    const retry = new FakeLlmProvider([
+      textResponse(files('src/add.test.ts', 't')),
+      textResponse(files('src/add.ts', 'good-impl')),
+      textResponse(files('src/add.ts', 'tidy')),
+    ]);
+    const retrySandbox = new FakeCodeSandbox(['failed', 'passed', 'passed'] as TestRunStatus[]);
+    const retryDeps = deps(store, retry, retrySandbox);
+    await handleImplement(job, retryDeps);
+
+    const done = (await store.getRunById(runId))!;
+    expect(done.state).toBe(RunState.Reviewing);
+    expect((await store.getTasks(runId))[0]!.status).toBe('done');
+    expect(done.context.implHelp).toBeUndefined(); // gate state cleared once it landed
+    // The guidance reached the agents.
+    expect(JSON.stringify(retry.requests)).toContain('drop the bogus AC and try again');
+  });
+
+  it('aborts the run when the human replies /abort at the gate', async () => {
+    const runId = await seedImplementingRun(store);
+    const first = stalledScripts();
+    await handleImplement(job, deps(store, first.provider, first.sandbox));
+
+    await handleResumeImplementation(resumeJob('/abort'), deps(store, new FakeLlmProvider(), new FakeCodeSandbox()));
+
+    expect((await store.getRunById(runId))!.state).toBe(RunState.Aborted);
+    expect(await store.claimNextJob()).toBeNull(); // no retry enqueued
+  });
+
+  it('fails for real once the guided-retry cap is exceeded', async () => {
+    const runId = await seedImplementingRun(store);
+    // Seed a run already parked at the gate with the cap already consumed.
+    await store.updateRunState(runId, RunState.AwaitingImplHelp);
+    await store.updateRunContext(runId, {
+      planData,
+      implHelp: { taskId: 1, stage: 'impl', rounds: IMPL_HELP_CAP },
+    });
+
+    await handleResumeImplementation(
+      resumeJob('one more try'),
+      deps(store, new FakeLlmProvider(), new FakeCodeSandbox()),
+    );
+
+    expect((await store.getRunById(runId))!.state).toBe(RunState.Failed);
+    expect(await store.claimNextJob()).toBeNull(); // no further retry
   });
 
   it('stops at a task boundary when the budget is exhausted', async () => {

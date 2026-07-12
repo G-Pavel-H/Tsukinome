@@ -4,6 +4,7 @@ import { LlmGateway } from '../../src/llm/gateway.js';
 import { InMemoryStore } from '../../src/store/memory-store.js';
 import { RunState, type Job } from '../../src/store/types.js';
 import { FIX_ROUND_CAP } from '../../src/pipeline/fix.js';
+import { SONNET_ATTEMPTS, OPUS_ATTEMPTS } from '../../src/pipeline/tdd.js';
 import { FakeLlmProvider, textResponse } from '../llm/fake-provider.js';
 import { FakeSandboxProvider } from '../sandbox/fake-sandbox.js';
 import { FakeCodeSandbox } from '../sandbox/fake-code-sandbox.js';
@@ -127,14 +128,17 @@ describe('handleFix', () => {
 
   it('escalates when the TDD loop cannot land the fix', async () => {
     const runId = await seedParkedPr(store);
+    const implAttempts = SONNET_ATTEMPTS + OPUS_ATTEMPTS;
     const provider = new FakeLlmProvider([
       triage('actionable'),
-      textResponse(files('src/add.test.ts', 't')),
-      textResponse(files('src/add.ts', 'i1')),
-      textResponse(files('src/add.ts', 'i2')),
-      textResponse(files('src/add.ts', 'i3')),
+      textResponse(files('src/add.test.ts', 't')), // test-author → red
+      // one implementer response per ladder rung (all fail)
+      ...Array.from({ length: implAttempts }, (_, i) => textResponse(files('src/add.ts', `i${i + 1}`))),
     ]);
-    const sandbox = new FakeCodeSandbox(['failed', 'failed', 'failed', 'failed'] as TestRunStatus[]);
+    const sandbox = new FakeCodeSandbox([
+      'failed',
+      ...(Array(implAttempts).fill('failed') as TestRunStatus[]),
+    ]);
     const d = deps(store, provider, sandbox);
 
     await handleFix(fixJob(), d);

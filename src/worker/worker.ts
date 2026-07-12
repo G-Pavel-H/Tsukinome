@@ -15,6 +15,7 @@ import {
   handleProducePlan,
   handleProduceSpec,
   handleResumeClarification,
+  handleResumeImplementation,
   handleResumePlanDecision,
   handleReview,
   handleRunTests,
@@ -58,6 +59,9 @@ async function dispatch(job: Job, deps: WorkerDeps): Promise<void> {
       return;
     case 'implement':
       await handleImplement(job, deps);
+      return;
+    case 'resume_implementation':
+      await handleResumeImplementation(job, deps);
       return;
     case 'review':
       await handleReview(job, deps);

@@ -19,14 +19,16 @@ export class FakeCodeSandbox implements CodeSandbox {
   async runTests(): Promise<TestRunResult> {
     const status = this.queue.shift() ?? 'passed';
     this.testRuns.push(status);
+    const passed = status === 'passed';
     return {
       status,
-      passed: status === 'passed',
-      exitCode: status === 'passed' ? 0 : 1,
+      passed,
+      exitCode: passed ? 0 : 1,
       durationMs: 1,
       command: 'npm test',
-      failureStage: status === 'passed' ? undefined : 'test',
-      outputTail: '',
+      failureStage: passed ? undefined : 'test',
+      // Distinct per-run marker so tests can prove the failure output is threaded onward.
+      outputTail: passed ? '' : `vitest-failure-#${this.testRuns.length}`,
     };
   }
 

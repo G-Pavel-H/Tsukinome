@@ -7,9 +7,14 @@ import type { FileEdit, FileSet, TaskList } from './schemas.js';
 
 export type TaskSpec = TaskList['tasks'][number];
 
-/** Escalation ladder: try the cheap model first, then promote to Opus, then give up. */
-export const SONNET_ATTEMPTS = 2;
-export const OPUS_ATTEMPTS = 1;
+/**
+ * Escalation ladder: try the cheap model first, then promote to Opus, then give up.
+ * Sized to give a right-sized single cohesive task (one function / one contract) headroom
+ * to land before escalating. Extra attempts only fire on failure, so a task that greens on
+ * the first try costs the same as before.
+ */
+export const SONNET_ATTEMPTS = 3;
+export const OPUS_ATTEMPTS = 2;
 const LADDER: (ModelTier | undefined)[] = [
   ...Array<undefined>(SONNET_ATTEMPTS).fill(undefined), // role default tier (implementation/Sonnet)
   ...Array<ModelTier>(OPUS_ATTEMPTS).fill('review'), // promote to Opus
@@ -24,6 +29,12 @@ export interface TddContext {
   planMarkdown: string;
   /** Paths the plan touches — read from the sandbox to give agents real file context. */
   affectedPaths: string[];
+  /**
+   * Optional maintainer guidance from the "stuck" gate (e.g. "that acceptance criterion is wrong,
+   * drop its test"). Authoritative for this task — but the red→green gate still holds, so the
+   * (possibly reduced) suite must pass; guidance can never force a non-green commit.
+   */
+  humanGuidance?: string;
 }
 
 export interface TaskOutcome {
@@ -34,6 +45,8 @@ export interface TaskOutcome {
   greenObserved: boolean;
   /** Paths touched across the task (re-read + committed by the caller). */
   changedPaths: string[];
+  /** On escalation: the tail of the last test run, so a human sees *why* it stalled. */
+  lastFailureOutput?: string;
 }
 
 /** Break the approved plan into small, independently testable tasks. */
@@ -73,18 +86,31 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
   const { sandbox, gateway, runId, log } = ctx;
   const agentCtx = { runId, gateway, log };
   const touched = new Set<string>();
+  const guidanceBlock = ctx.humanGuidance
+    ? `\n\n## Maintainer guidance (authoritative — a human reviewed a stalled attempt)\n` +
+      `${ctx.humanGuidance}\n\n` +
+      `Follow this guidance. If it says an acceptance criterion or a specific test is wrong, drop or ` +
+      `adjust exactly that test — but every remaining test must still pass. Do NOT weaken or delete ` +
+      `tests merely to make the suite go green.`
+    : '';
   const baseContext =
-    `Spec:\n${ctx.specMarkdown}\n\nPlan:\n${ctx.planMarkdown}\n\n${taskHeader(task)}`;
+    `Spec:\n${ctx.specMarkdown}\n\nPlan:\n${ctx.planMarkdown}\n\n${taskHeader(task)}${guidanceBlock}`;
 
   // --- Test Author: write tests that FAIL now (red). A test that passes pre-impl is rejected. ---
   let testFiles: FileEdit[] = [];
   let redObserved = false;
+  let lastNotRedOutput = '';
   for (const tier of LADDER) {
     const current = await sandbox.readFiles(ctx.affectedPaths);
+    const feedback = lastNotRedOutput
+      ? `\n\nYour previous tests PASSED with no implementation, which violates TDD ordering — ` +
+        `they must fail first. Test runner output (tail):\n${lastNotRedOutput}\n` +
+        `Write tests that assert the new behavior so they fail now.`
+      : '';
     const out = await runAgent<FileSet>(
       'test-author',
       {
-        messages: [{ role: 'user', content: `${baseContext}\n\nCurrent files:\n${renderFiles(current)}` }],
+        messages: [{ role: 'user', content: `${baseContext}\n\nCurrent files:\n${renderFiles(current)}${feedback}` }],
         tierOverride: tier,
       },
       agentCtx,
@@ -97,17 +123,24 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
       redObserved = true; // good: the new tests fail before any implementation
       break;
     }
+    lastNotRedOutput = result.outputTail;
     log.info({ runId, task: task.id, status: result.status }, 'Test-author tests did not go red; retrying');
   }
   testFiles.forEach((f) => touched.add(f.path));
   if (!redObserved) {
-    return { status: 'escalated', stage: 'test', redObserved: false, greenObserved: false, changedPaths: [...touched] };
+    return { status: 'escalated', stage: 'test', redObserved: false, greenObserved: false, changedPaths: [...touched], lastFailureOutput: lastNotRedOutput };
   }
 
   // --- Implementer: minimum code so the new tests pass AND the full suite stays green. ---
   let greenObserved = false;
+  let lastFailureOutput = '';
   for (const tier of LADDER) {
     const current = await sandbox.readFiles(ctx.affectedPaths);
+    const feedback = lastFailureOutput
+      ? `\n\nYour previous implementation attempt did NOT make the suite green. ` +
+        `Test runner output (tail):\n${lastFailureOutput}\n` +
+        `Study the failure above and fix the implementation so every test passes. Do not modify the tests.`
+      : '';
     const out = await runAgent<FileSet>(
       'implementer',
       {
@@ -116,7 +149,7 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
             role: 'user',
             content:
               `${baseContext}\n\nFailing tests:\n${renderFiles(testFiles)}\n\n` +
-              `Current files:\n${renderFiles(current)}`,
+              `Current files:\n${renderFiles(current)}${feedback}`,
           },
         ],
         tierOverride: tier,
@@ -131,10 +164,11 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
       greenObserved = true;
       break;
     }
+    lastFailureOutput = result.outputTail;
     log.info({ runId, task: task.id, status: result.status }, 'Implementation not green; retrying');
   }
   if (!greenObserved) {
-    return { status: 'escalated', stage: 'impl', redObserved: true, greenObserved: false, changedPaths: [...touched] };
+    return { status: 'escalated', stage: 'impl', redObserved: true, greenObserved: false, changedPaths: [...touched], lastFailureOutput };
   }
 
   // --- Refactor (best-effort): clean up while keeping green; revert if it breaks. ---

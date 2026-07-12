@@ -1,5 +1,7 @@
 /** Phase 10 PR fix-loop replies + the per-run fix-round cap. */
 
+import { renderTestOutputBlock } from './implement.js';
+
 export const FIX_ROUND_CAP = 3;
 
 export function renderFixClarifyComment(reason: string): string {
@@ -27,9 +29,9 @@ export function renderFixCapComment(): string {
   );
 }
 
-export function renderFixEscalationComment(): string {
-  return (
+export function renderFixEscalationComment(failureOutput?: string): string {
+  const base =
     '🙋 **I couldn’t land this fix** within my retry budget without breaking the suite, so I’ve ' +
-    'stopped rather than guess. A human can take a look — the work so far is on the branch.'
-  );
+    'stopped rather than guess. A human can take a look — the work so far is on the branch.';
+  return base + renderTestOutputBlock(failureOutput);
 }

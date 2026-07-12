@@ -16,6 +16,7 @@ export const RunState = {
   Planning: 'planning',
   AwaitingPlanApproval: 'awaiting_plan_approval',
   Implementing: 'implementing',
+  AwaitingImplHelp: 'awaiting_impl_help',
   Reviewing: 'reviewing',
   Integrating: 'integrating',
   AwaitingPrReview: 'awaiting_pr_review',
@@ -40,6 +41,7 @@ export type JobType =
   | 'produce_plan'
   | 'resume_plan_decision'
   | 'implement'
+  | 'resume_implementation'
   | 'review'
   | 'fix';
 
@@ -113,6 +115,19 @@ export interface ImplementPayload {
   issueNumber: number;
 }
 
+/**
+ * Payload for a `resume_implementation` job: a human replied at the "stuck" gate. The comment
+ * is either `/abort` or free-text guidance threaded into the retried task's TDD loop.
+ */
+export interface ResumeImplementationPayload {
+  installationId: number;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  /** The human's guidance comment — untrusted DATA, used to steer the retry (or /abort). */
+  commentBody: string;
+}
+
 /** Payload for a `review` job (Phase 9 reviewer + PR). */
 export interface ReviewPayload {
   installationId: number;
@@ -146,6 +161,7 @@ export type JobPayload =
   | ProducePlanPayload
   | ResumePlanDecisionPayload
   | ImplementPayload
+  | ResumeImplementationPayload
   | ReviewPayload
   | FixPayload;
 
