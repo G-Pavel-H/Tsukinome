@@ -7,22 +7,22 @@ export function formatDuration(ms: number): string {
     return `${Math.round(ms)}ms`;
   }
 
-  const s = Math.round(ms / 1000);
+  const seconds = Math.round(ms / 1000);
 
-  if (s < 60) {
-    return `${s}s`;
+  if (seconds < 60) {
+    return `${seconds}s`;
   }
 
-  const m = Math.floor(s / 60);
-  const rem = s % 60;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
 
-  if (m < 60) {
-    return `${m}m ${rem}s`;
+  if (minutes < 60) {
+    return `${minutes}m ${remainingSeconds}s`;
   }
 
-  const mTotal = Math.round(ms / 60000);
-  const h = Math.floor(mTotal / 60);
-  const remM = mTotal % 60;
+  const totalMinutes = Math.round(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const remainingMinutes = totalMinutes % 60;
 
-  return `${h}h ${remM}m`;
+  return `${hours}h ${remainingMinutes}m`;
 }
