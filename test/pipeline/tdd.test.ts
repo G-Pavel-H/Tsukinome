@@ -108,6 +108,21 @@ describe('runTaskTdd', () => {
     expect(JSON.stringify(implReqs[1])).toContain('vitest-failure-#2'); // retry sees the failure
   });
 
+  it('passes the repo test-runner conventions to the test-author', async () => {
+    const provider = new FakeLlmProvider([
+      textResponse(files('test/add.test.ts', 'test')), // test-author writes into test/
+      textResponse(files('src/add.ts', 'impl')), // implementer
+      textResponse(files('src/add.ts', 'tidy')), // refactor
+    ]);
+    const sandbox = new FakeCodeSandbox(['failed', 'passed', 'passed']);
+    const conventions = "include: ['test/**/*.test.ts']";
+
+    await runTaskTdd(task, { ...(await ctx(store, provider, sandbox)), testConventions: conventions });
+
+    // The first request is the test-author's — it must carry the conventions block.
+    expect(JSON.stringify(provider.requests[0])).toContain("include: ['test/**/*.test.ts']");
+  });
+
   it('carries the last failure output on an impl escalation', async () => {
     const provider = new FakeLlmProvider();
     provider.always = textResponse(files('src/add.ts', 'impl'));

@@ -270,6 +270,23 @@ Keep this current. It's the source of truth for what's done and what's next.
   their E2B account (`e2b template build --name tsukinome-node22 --dockerfile e2b.Dockerfile`) and set
   `E2B_TEMPLATE`. 196 pass / 23 skip, typecheck + lint clean (the E2B path itself is gated, verified
   live).
+- 2026-07-12 (post-go-live, test placement): **The real reason `formatDuration` stalled at the
+  *test-author* stage — new tests were written where the runner never looks.** With the Node-22
+  sandbox working, a live run (issue #12) got all the way to the TDD loop, then looped "Test-author
+  tests did not go red" five times and parked at the human-help gate (stage `test`). Logs made it
+  obvious: the escalation's test output showed the **exact same 36 files / 196 tests as the normal
+  suite** — the test-author's new file was never collected. Cause: this repo's `vitest.config.ts` sets
+  `include: ['test/**/*.test.ts']` (tests live in a top-level `test/` tree), but the Architect's plan
+  co-located the new test at `src/utils/formatDuration.test.ts`. A test vitest never collects passes
+  vacuously → can never go red → un-greenable. General bug (agents didn't know the target repo's test
+  convention), surfaced on dogfooding. Fix: `runTaskTdd` now reads the repo's test-runner config from
+  the sandbox (`readTestConventions` — vitest/jest config files, else package.json) and threads it into
+  the **test-author** prompt with an instruction to place files where the runner collects them (and to
+  re-check placement on a "didn't go red" retry); `agents/test-author.md` updated to match. Wired into
+  both the implement and fix loops. The TDD gate is unchanged — this just stops the test-author from
+  writing invisible tests. 197 pass / 23 skip, typecheck + lint clean. Left the Architect plan as-is
+  (it may still suggest a co-located path, but the test-author now overrides placement); revisit giving
+  the Architect the same context if plans look wrong. **Redeploy + re-run to confirm.**
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)

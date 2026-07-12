@@ -30,6 +30,12 @@ export interface TddContext {
   /** Paths the plan touches — read from the sandbox to give agents real file context. */
   affectedPaths: string[];
   /**
+   * The target repo's test-runner configuration (e.g. `vitest.config.ts` contents), so the
+   * test-author places new test files where the runner will actually collect them. A test the
+   * runner never picks up passes vacuously and can never go red — the #1 cause of test-stage stalls.
+   */
+  testConventions?: string;
+  /**
    * Optional maintainer guidance from the "stuck" gate (e.g. "that acceptance criterion is wrong,
    * drop its test"). Authoritative for this task — but the red→green gate still holds, so the
    * (possibly reduced) suite must pass; guidance can never force a non-green commit.
@@ -61,6 +67,33 @@ export async function decompose(
     ctx,
   );
   return result.output!.tasks;
+}
+
+/**
+ * Read the target repo's test-runner configuration from the sandbox so the test-author places new
+ * test files where the runner will actually collect them. Prefers a dedicated config file; falls
+ * back to package.json (which may carry a `jest` key + the test script). Returns undefined if none.
+ */
+export async function readTestConventions(sandbox: CodeSandbox): Promise<string | undefined> {
+  const configs = [
+    'vitest.config.ts',
+    'vitest.config.js',
+    'vitest.config.mts',
+    'vitest.config.mjs',
+    'vite.config.ts',
+    'vite.config.js',
+    'jest.config.ts',
+    'jest.config.js',
+    'jest.config.cjs',
+    'jest.config.mjs',
+    'jest.config.json',
+  ];
+  const found = await sandbox.readFiles(configs);
+  if (found.length > 0) {
+    return found.map((f) => `--- ${f.path} ---\n${f.content}`).join('\n\n');
+  }
+  const [pkg] = await sandbox.readFiles(['package.json']);
+  return pkg ? `--- package.json ---\n${pkg.content}` : undefined;
 }
 
 function renderFiles(files: { path: string; content: string }[]): string {
@@ -97,6 +130,12 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
     `Spec:\n${ctx.specMarkdown}\n\nPlan:\n${ctx.planMarkdown}\n\n${taskHeader(task)}${guidanceBlock}`;
 
   // --- Test Author: write tests that FAIL now (red). A test that passes pre-impl is rejected. ---
+  const conventionsBlock = ctx.testConventions
+    ? `\n\n## Repo test-runner config (place new test files where this will collect them):\n` +
+      `${ctx.testConventions}\n` +
+      `If it only collects a top-level test/ tree, put your file there (mirroring the source path), ` +
+      `NOT co-located under src/ — a test the runner never collects can never go red.`
+    : '';
   let testFiles: FileEdit[] = [];
   let redObserved = false;
   let lastNotRedOutput = '';
@@ -105,12 +144,18 @@ export async function runTaskTdd(task: TaskSpec, ctx: TddContext): Promise<TaskO
     const feedback = lastNotRedOutput
       ? `\n\nYour previous tests PASSED with no implementation, which violates TDD ordering — ` +
         `they must fail first. Test runner output (tail):\n${lastNotRedOutput}\n` +
-        `Write tests that assert the new behavior so they fail now.`
+        `Write tests that assert the new behavior so they fail now. If your test file may not have ` +
+        `been collected by the runner, check its location/naming against the repo config above.`
       : '';
     const out = await runAgent<FileSet>(
       'test-author',
       {
-        messages: [{ role: 'user', content: `${baseContext}\n\nCurrent files:\n${renderFiles(current)}${feedback}` }],
+        messages: [
+          {
+            role: 'user',
+            content: `${baseContext}${conventionsBlock}\n\nCurrent files:\n${renderFiles(current)}${feedback}`,
+          },
+        ],
         tierOverride: tier,
       },
       agentCtx,

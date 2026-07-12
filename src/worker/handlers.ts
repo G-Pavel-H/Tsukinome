@@ -20,7 +20,7 @@ import { runTests } from '../sandbox/run-tests.js';
 import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
-import { decompose, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
+import { decompose, readTestConventions, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
 import {
   IMPL_HELP_CAP,
   renderEscalationComment,
@@ -901,6 +901,7 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
       specMarkdown: specArtifact.content,
       planMarkdown: planArtifact.content,
       affectedPaths,
+      testConventions: await readTestConventions(sandbox),
     };
 
     for (const task of tasks) {
@@ -1255,6 +1256,7 @@ export async function handleFix(job: Job, deps: ImplementHandlerDeps): Promise<v
         specMarkdown: specArtifact?.content ?? '',
         planMarkdown: planArtifact?.content ?? '',
         affectedPaths: filePath ? [filePath] : [],
+        testConventions: await readTestConventions(sandbox),
       });
 
       if (outcome.status === 'escalated') {
