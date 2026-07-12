@@ -19,86 +19,30 @@ Keep this current. It's the source of truth for what's done and what's next.
 
 ## Outstanding issues (revisit before calling go-live done)
 
-- **✅ LARGELY RESOLVED (2026-07-12) — the "implementer exhausted the loop" escalations.** This was
-  first filed (by the earlier cowork session) as a decomposition *design-tension*: a cohesive function
-  split into slices that are only observable through the *same* public contract, so an early slice
-  can't green until later ones land (originally on issue #4 `parsePlanDecision`, now deleted). **That
-  framing was superseded this session.** On a fresh live repro (issue #7, `formatDuration`) the actual
-  causes were:
-  1. **The implementer was retrying blind.** `runTaskTdd` computed the vitest failure output
-     (`result.outputTail`) and then *threw it away* — never fed it to the next attempt, never persisted
-     it, never put it in the "I'm stuck" comment. So the model guessed across the whole ladder without
-     seeing which assertion failed, and a human couldn't see why either. This — not decomposition — is
-     why even a trivial function exhausted every rung.
-  2. **A false-premise acceptance criterion.** #7 asked to wire `formatDuration` into a cost-summary
-     *duration* that doesn't exist (`renderCostSummary` shows cost + tokens only), so that AC was
-     un-greenable no matter the implementation.
-  - **Route actually taken** (see Decision log, 2026-07-12, three entries):
-    (a) *[cowork step, kept]* right-size decomposition — a cohesive change is a **single task** — and
-    raise the ladder to Sonnet 3 / Opus 2; (b) *[the real fix]* **feed the failing test output back to
-    the implementer** each retry + surface it in the escalation comment (`FakeCodeSandbox` now emits a
-    per-run marker so it's tested); (c) *[the escape hatch]* a **human-help gate** — a stuck run parks
-    at `AwaitingImplHelp`, shows the failing tests, and asks for guidance ("drop that test") then
-    retries, instead of dead-ending at `Failed`. The per-task red→green gate, TDD ordering, and
-    green-per-commit invariants are **unchanged**. Rejected options (b) per-group gate and (c)
-    internal-helper tests from the old framing still stand as rejected. **Not yet proven live** — next
-    is an end-to-end run on a valid issue.
-  - **Still open (reliability, unchanged):** a non-budget exception thrown *after* the
-    `Planning`/`Implementing` transition can't self-recover — the retry is skipped by the
-    `state !== <expected>` guard, stranding the run in the transient state. Harden (reset-to-prior-state
-    on retry, or transition only after the risky step). Surfaced via the CocoIndex failure below.
-
-### Parked during go-live — 2026-07-12 (discuss next session)
-
-> **Resolved 2026-07-12 (discussion):** Took the decomposition + attempt-budget path for the TDD
-> gate (item 1 below) — see the Decision log entry of the same date. Cost tiers (item 2) and
-> CocoIndex (item 3) were **deliberately left as-is** for now, to be revisited after a clean green
-> run: cost pending the `llm_calls` breakdown, CocoIndex staying best-effort/disabled. The Haiku
-> classifier was consciously **not** added — held in reserve for a genuine behavior-preserving
-> refactor rather than added speculatively.
-
-- **⏸️ Ease the TDD gate for the testing phase — let the model choose TDD vs direct.** Even the
-  simpler `formatDuration` test issue got stuck in the loop. Pavel wants to relax the hard gate so
-  not every issue is forced through red→green. **Tension to weigh:** this is a departure from a
-  *locked* decision ("TDD as hard mechanical gates" is the core product thesis). Proposed middle
-  path: keep the hard loop, but add a cheap **Haiku up-front classifier** that tags each issue
-  `tdd` vs `direct` and routes accordingly — relax *by policy, per issue*, not by gutting the
-  invariant. Also folds in the blocker above (cohesive-rewrite issues → `direct`).
-  **Update 2026-07-12:** founder chose to **keep TDD and fix the feedback loop** instead (see Decision
-  log). The `tdd`-vs-`direct` classifier was **not** built; the new **human-help gate** now provides
-  the escape hatch (a human can steer or drop a bad test at the stuck-gate). Still parked as a possible
-  future policy, but no longer the front-runner.
+- **⏸️ Non-recoverable transient state (reliability).** A non-budget exception thrown *after* the
+  `Planning`/`Implementing` transition can't self-recover — the retry is skipped by the
+  `state !== <expected>` guard, stranding the run in the transient state. Harden it (reset-to-prior-state
+  on retry, or transition only after the risky step).
 - **⏸️ Cost: consider Sonnet-only (drop Opus).** Opus (spec/plan/review) is the priciest tier and
   Pavel flagged per-issue cost as too high for the app. Change is trivial — the three role→model
   constants in `src/llm/models.ts` (triage=Haiku, implementation=Sonnet, review=Opus). **Before
   cutting:** pull the actual `llm_calls` cost breakdown from a real run — Opus mostly hits the
   low-token spec/plan/review calls, so it may be a small share of spend; consider keeping Opus on
   *plan only*. Decide against measured data, not a guess.
-- **⏸️ CocoIndex disabled (needs review).** Got stuck during go-live; Pavel + CC disabled it to
-  proceed. Safe for now — per-run indexing was always the MVP nice-to-have, and the pipeline is
-  designed to run without it (plan-time retrieval degrades, nothing breaks). Related: the
-  state-guard / non-recoverable-transient-state issue noted above surfaced via this failure.
-  Revisit the sidecar (exact API surface + why it hung) before re-enabling.
+- **⏸️ CocoIndex disabled (needs review).** Currently best-effort/off. Safe — per-run indexing was
+  always the MVP nice-to-have, and the pipeline runs without it (plan-time retrieval degrades, nothing
+  breaks). The live failure is `ModuleNotFoundError: No module named 'cocoindex'` — the Python sidecar
+  dep isn't installed, not a code bug. Re-enabling it is the plan-of-record fix for the bad-AC item
+  below (gives the Opus Architect real code to plan against): install the sidecar deps, confirm the
+  exact CocoIndex API surface, then turn it back on.
 
-- **⏸️ Bad/unsatisfiable ACs should be caught up front, not fail the TDD loop (founder, 2026-07-12).**
-  Issue #7 escalated because an acceptance criterion was impossible (wire `formatDuration` into a
-  cost-summary duration that doesn't exist). The **clarifier or planner** should have caught the false
-  premise — the loop failing on it is the wrong place. Two threads: (1) with **CocoIndex** on, the
-  Architect would see the real `renderCostSummary` and know there's no duration to wire into (founder
-  "really misses CocoIndex" — revisit re-enabling); (2) even without retrieval, a **Definition-of-Ready
-  / plan-feasibility check** could flag ACs that reference code that can't be located. Also note a
-  subtler trap: an AC that requires changing **already-tested** output (e.g. the cost-summary token
-  column, pinned by `cost.test.ts`) is un-greenable because the implementer can't edit existing tests —
-  the loop should detect "my change broke a *pre-existing* test" and route back rather than exhaust.
-  Parked — "figure out later." **Partial mitigation shipped 2026-07-12:** the new human-help gate
-  (below) means a bad AC no longer dead-ends — a human can say "drop that test" and the loop retries.
-  The *automatic* up-front catch (clarifier/planner/CocoIndex) is still the open part.
-  **Founder working assumption (2026-07-12): re-enabling CocoIndex is expected to fix this.** The
-  Architect is **Opus** and *should* notice a false premise like "no duration in the cost summary" — it
-  can't today because with CocoIndex off it plans blind (no view of the real `renderCostSummary`). So
-  the plan of record is: get CocoIndex working, then the Opus planner sees the actual code and rejects/
-  reshapes impossible ACs before they reach the loop. Treat the bad-AC catch as **blocked on CocoIndex**
-  for now rather than building a separate DoR feasibility check; revisit if CocoIndex doesn't fix it.
+- **⏸️ Bad/unsatisfiable ACs should be caught up front (blocked on CocoIndex).** An impossible
+  acceptance criterion (e.g. "wire into a field that doesn't exist") should be caught by the **Opus**
+  Architect, not fail the TDD loop. It can't today because with CocoIndex off it plans blind. Plan of
+  record: re-enable CocoIndex so the Architect sees real code and reshapes impossible ACs before they
+  reach the loop; the human-help gate is the stopgap until then. (Subtler trap to keep in mind: an AC
+  that requires changing **already-tested** output is un-greenable because the implementer can't edit
+  existing tests — the loop could detect "my change broke a *pre-existing* test" and route back.)
 
 ## Locked decisions
 
@@ -192,101 +136,26 @@ Keep this current. It's the source of truth for what's done and what's next.
 - 2026-06-28 (Phase 11): **Cost is surfaced + measured.** `renderCostSummary` (`src/pipeline/cost.ts`) rolls calls up per role (cache tokens counted as input, costliest role first) into a markdown block shown in the **PR body** and the **PR-opened issue comment** (founder's choice). `getCostMetrics()` aggregates `runs.spent_nano_usd` → `{runCount,totalNanoUsd,avgCostNanoUsd}` (the measured avg cost/issue that replaces the planning estimate), exposed via `npm run debug:cost-metrics`. Budget knob: `RUN_BUDGET_USD` (dollars → nano-USD in `config.ts`, default $1.00) applied via `setRunBudget` the once a run is created in `handleIssueOpened`.
 - 2026-06-28 (Phase 11): **Security pass is documented + regression-tested.** `docs/security.md` records the four pillars; `test/security/boundary.test.ts` pins the load-bearing ones — no agent role carries a write-capable tool (only the `ping` stub; all real roles are schema-only), the exported `CONSTITUTION` still declares external text untrusted DATA, and `redactToken` strips the clone token. The integrator wall, least-privilege `contents:read` clone token, and bot-comment handling were already in place from earlier phases.
 - 2026-06-28 (Phase 11): **Install UX needs no per-repo files.** README rewritten product-first (flow, gates, config table, observability) + `docs/setup.md` (GitHub App perms: contents/issues/PRs r-w + metadata r; events: issues, issue_comment, pull_request_review, pull_request_review_comment; env table; migrate/run/deploy). `.env.example` stays absent (blocked by this env's permission settings, as since Phase 2) — the env table is the source of truth.
-- 2026-07-12 (post-go-live, TDD blocker): **Fixed the cohesive-function decomposition trap via
-  decomposition granularity + attempt budget — NOT by relaxing the TDD invariant.** Root cause was
-  the Decomposer over-splitting: `agents/decomposer.md` demanded "3–6 tasks" and "even when the change
-  centers on one function, decompose it into successive small behaviors", which produced slices only
-  observable through the *same* public function — un-greenable until the whole function existed.
-  Rewrote the guidance: a change that is really one cohesive function/contract is a **single task**;
-  split **only** where pieces are separately observable through the public surface (distinct
-  functions/endpoints/exported behaviors); never split one behavior by its internal steps; each task
-  must be **independently greenable**. Raised the escalation ladder in `src/pipeline/tdd.ts`
-  (`SONNET_ATTEMPTS 2→3`, `OPUS_ATTEMPTS 1→2`) so a right-sized single task has headroom before
-  escalating — extra attempts only fire on failure, so a first-try-green task costs the same (keeps
-  the parked cost decision untouched). The per-task red→green gate, TDD ordering, and green-per-commit
-  invariants are **unchanged** — the locked "TDD as hard mechanical gate" thesis stands. Rejected the
-  per-group gate (breaks green-per-commit/restartability) and internal-helper tests (couples tests to
-  private structure). The Haiku `tdd`-vs-`direct` classifier was **not** added — reserved for a real
-  behavior-preserving refactor, to be framed as behavior-change→TDD vs behavior-preserving→
-  change-under-green rather than a free escape hatch. Three ladder-length-dependent unit tests
-  (`tdd.test.ts`, `handle-implement.test.ts`, `handle-fix.test.ts`) now derive their fake scripts from
-  the exported constants instead of hardcoding, so the ladder can move without silent test rot.
-  Verified: 189 pass / 23 skip (baseline), typecheck + lint clean. **Not yet run live** — next is a
-  real end-to-end run through Pavel's Claude Code CLI on the installed repo to confirm the TDD loop
-  now clears the first task and produces a PR.
-- 2026-07-12 (post-go-live, TDD blocker #2): **Root-caused the "implementer exhausted" escalations
-  and added test-failure feedback to the TDD loop — kept the TDD gate (founder decision).** Two causes
-  found by re-running on issue #7 (`formatDuration`): (a) **the implementer retried blind** — the loop
-  computed `result.outputTail` (the real vitest error) and *threw it away*, so the model guessed across
-  all 5 rungs without ever seeing which assertion failed, and the human escalation comment was vague
-  ("I'm stuck") for the same reason; (b) **issue #7's premise is false** — it asks to wire
-  `formatDuration` into a *duration shown in the cost summary*, but `renderCostSummary`
-  (`src/pipeline/cost.ts`) has **no duration field at all** (cost + token counts only), so that
-  acceptance criterion is un-greenable no matter the implementation. The Architect couldn't catch this
-  because **CocoIndex is disabled** (it planned blind, writing the affected file as the literal
-  placeholder `<cost-summary-render-file>`). Fix (this session): `runTaskTdd` now threads the previous
-  run's `outputTail` back into the **implementer** retry prompt (and the test-author retry prompt when
-  tests won't go red), carries it on the escalated `TaskOutcome` (`lastFailureOutput`), and both
-  escalation comments (`renderEscalationComment` / `renderFixEscalationComment`) render it in a
-  collapsible **"Last test-run output"** block so the human sees *why* it stalled. TDD ordering + the
-  red→green gate are **unchanged**. Dogfooded TDD: added `test/pipeline/implement.test.ts` + two
-  `tdd.test.ts` cases (retry sees prior failure; escalation carries it), enhanced `FakeCodeSandbox` to
-  emit a per-run failure marker. 193 pass / 23 skip, typecheck + lint clean. **Note:** issue #7 is a
-  bad dogfood target (false premise) — re-run on an issue whose ACs are all genuinely satisfiable, or
-  first add a real duration field to the cost summary. **Not yet re-run live.**
-- 2026-07-12 (post-go-live, human-help gate): **Added a fourth suspend/resume gate — the "stuck"
-  escalation now asks the human for guidance and retries instead of dead-ending at `Failed`.** Founder
-  ask: "let me reply 'delete those tests, disregard that AC' and try again — better to have something
-  than nothing." Design (approved: retry-to-green keeping the TDD gate; implement-loop only for now):
-  new parked state `AwaitingImplHelp` + job `resume_implementation` + payload, mirroring the
-  clarification/plan gates. On a stalled task, `handleImplement` now parks `AwaitingImplHelp` (persisting
-  `context.implHelp = {taskId, stage, lastFailureOutput, rounds}`) and posts a comment that shows the
-  failing test output and invites guidance or `/abort` (the Phase-2 blind-retry fix makes that output
-  real). `app.ts` routes a human reply on `AwaitingImplHelp` → `resume_implementation`;
-  `handleResumeImplementation` handles `/abort` → `Aborted`, or stores the comment as
-  `implHelp.guidance`, bumps the round, and re-enters the **restartable** `implement` loop (reused
-  wholesale — it already skips `done` tasks). `runTaskTdd` threads the guidance (as an authoritative
-  "maintainer guidance" block) into the test-author + implementer prompts for the matching task only,
-  so "drop that test" makes the test-author rewrite the test file — **but the red→green gate still
-  holds**, so the reduced suite must still pass; guidance can steer *which* tests exist, never force a
-  non-green commit. Bounded by `IMPL_HELP_CAP = 3` guided rounds → then real `Failed`. Also added
-  `AwaitingImplHelp` to the stale-run sweep (`STALE_STATES`) so an unanswered gate still pings at 3d /
-  closes at 7d like the others. Dogfooded TDD (parks-not-fails, resume-to-green, `/abort`, cap-exceeded
-  tests). 196 pass / 23 skip, typecheck + lint clean. **No migration** (reuses the `runs.context`
-  jsonb). **Not yet run live.** Fix-loop (`handleFix`) escalation still dead-ends — deferred follow-up.
-- 2026-07-12 (post-go-live, sandbox Node): **Root cause of the *actual* live escalation — the E2B
-  sandbox runs an old Node, so `npm test` fails at import, not the model's code.** With the blind-retry
-  fix surfacing real test output, a live run's escalation comment showed the sandbox failing on
-  `test/app.test.ts` (`node:util` has no `parseEnv` → needs Node ≥ 20.12, via probot) and
-  `test/sandbox/e2b.integration.test.ts` (`require()` of ES-module chalk → needs Node ≥ 22.12, via the
-  e2b SDK). Both fail at **collection/import** time, so the whole suite is red no matter what the
-  implementer writes — un-greenable for a runtime reason no application code can fix (this is why
-  "Sonnet couldn't resolve it"). Cause: `E2BSandboxProvider.create` passed **no template**, so E2B
-  booted its default base image (Node < 20.12); local + CI are Node 22–23, which is why they're green.
-  Fix (founder chose the custom-template route): added `e2b.Dockerfile` (`FROM node:22`, full image so
-  git is present), a `template?` arg on `E2BSandboxProvider` wired from a new optional `E2B_TEMPLATE`
-  config, tightened `engines` to `>=22.12` + added `.nvmrc` (22), and documented the one-time
-  `e2b template build` in `docs/setup.md`. **Action still on the founder:** build the template with
-  their E2B account (`e2b template build --name tsukinome-node22 --dockerfile e2b.Dockerfile`) and set
-  `E2B_TEMPLATE`. 196 pass / 23 skip, typecheck + lint clean (the E2B path itself is gated, verified
-  live).
-- 2026-07-12 (post-go-live, test placement): **The real reason `formatDuration` stalled at the
-  *test-author* stage — new tests were written where the runner never looks.** With the Node-22
-  sandbox working, a live run (issue #12) got all the way to the TDD loop, then looped "Test-author
-  tests did not go red" five times and parked at the human-help gate (stage `test`). Logs made it
-  obvious: the escalation's test output showed the **exact same 36 files / 196 tests as the normal
-  suite** — the test-author's new file was never collected. Cause: this repo's `vitest.config.ts` sets
-  `include: ['test/**/*.test.ts']` (tests live in a top-level `test/` tree), but the Architect's plan
-  co-located the new test at `src/utils/formatDuration.test.ts`. A test vitest never collects passes
-  vacuously → can never go red → un-greenable. General bug (agents didn't know the target repo's test
-  convention), surfaced on dogfooding. Fix: `runTaskTdd` now reads the repo's test-runner config from
-  the sandbox (`readTestConventions` — vitest/jest config files, else package.json) and threads it into
-  the **test-author** prompt with an instruction to place files where the runner collects them (and to
-  re-check placement on a "didn't go red" retry); `agents/test-author.md` updated to match. Wired into
-  both the implement and fix loops. The TDD gate is unchanged — this just stops the test-author from
-  writing invisible tests. 197 pass / 23 skip, typecheck + lint clean. Left the Architect plan as-is
-  (it may still suggest a co-located path, but the test-author now overrides placement); revisit giving
-  the Architect the same context if plans look wrong. **Redeploy + re-run to confirm.**
+- 2026-07-12 (post-go-live): **Closed the go-live blockers — the issue→PR loop now runs end to end
+  and produced its first live PR.** Fixes (full detail in git history), TDD gate unchanged throughout:
+  - **Decomposition right-sizing** — a cohesive change is one task; split only where pieces are
+    separately observable through the public surface. Ladder raised to Sonnet 3 / Opus 2.
+    (`agents/decomposer.md`, `src/pipeline/tdd.ts`)
+  - **Test-failure feedback** — `runTaskTdd` threads the previous run's `outputTail` back into the
+    implementer/test-author retry and surfaces it in the escalation comment (it was discarded, so
+    retries were blind and failures invisible). (`tdd.ts`, `implement.ts`, `fix.ts`)
+  - **Human-help gate** — a stalled task parks at `AwaitingImplHelp` and asks for guidance (or
+    `/abort`) instead of dead-ending; guidance threads into the retried task, bounded by
+    `IMPL_HELP_CAP = 3`; red→green gate still holds. New job `resume_implementation`; added to
+    `STALE_STATES`. Fix-loop escalation still dead-ends (deferred).
+  - **Sandbox Node** — `E2BSandboxProvider` takes an optional `E2B_TEMPLATE`; built the `tsukinome-node22`
+    template (`e2b.Dockerfile`, `FROM node:22`) so the sandbox's `npm test` doesn't fail at import on
+    old Node. `engines >=22.12`, `.nvmrc`, logs the template at sandbox creation.
+  - **Test placement** — `runTaskTdd` reads the target repo's test-runner config (`readTestConventions`)
+    and tells the test-author where the runner collects tests (it was writing `src/`-co-located tests
+    that vitest's `include: ['test/**']` never ran → vacuously green). (`agents/test-author.md`)
+  - **Ops** — console logger wired through (Probot's was null); CocoIndex retrieval made best-effort.
+    All green (197 pass / 23 skip), typecheck + lint clean.
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)
@@ -306,11 +175,10 @@ installed on this repo as the dogfood target. Local run via `npm run dev` + smee
   (`getCostMetrics`/`getLlmCalls` see rows from concurrent suites) — a shared-DB artifact, not a
   code defect; CI isolates per run.
 
-**Live run (issue #4 — a bug report on Tsukinome's own `parsePlanDecision`).** Drove
-ack → draft spec → clarification (1 question, answered) → `plan.md` → `/approve` → decomposition →
-TDD loop. Everything worked **up to and including task decomposition**; the run then escalated on
-the first TDD task and stopped — see **Outstanding issues** (the cohesive-function decomposition
-blocker). No PR was produced yet.
+**Live run.** First bring-up drove ack → draft spec → clarification → `plan.md` → `/approve` →
+decomposition → TDD loop, then escalated on the first TDD task. The follow-up fixes (see the
+2026-07-12 Decision log entry) closed those blockers; the loop now runs **end to end and produced its
+first live PR**.
 
 **Bugs found & fixed** (committed on branch `fix/go-live-runtime-fixes`, commit `703b129`; not yet
 merged to `main`). All were gaps the scripted unit-test fakes hid:
