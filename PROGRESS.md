@@ -43,6 +43,27 @@ Keep this current. It's the source of truth for what's done and what's next.
     in the transient state). Worth hardening (reset-to-prior-state on retry, or transition only
     after the risky step). Surfaced via the CocoIndex failure below.
 
+### Parked during go-live — 2026-07-12 (discuss next session)
+
+- **⏸️ Ease the TDD gate for the testing phase — let the model choose TDD vs direct.** Even the
+  simpler `formatDuration` test issue got stuck in the loop. Pavel wants to relax the hard gate so
+  not every issue is forced through red→green. **Tension to weigh:** this is a departure from a
+  *locked* decision ("TDD as hard mechanical gates" is the core product thesis). Proposed middle
+  path: keep the hard loop, but add a cheap **Haiku up-front classifier** that tags each issue
+  `tdd` vs `direct` and routes accordingly — relax *by policy, per issue*, not by gutting the
+  invariant. Also folds in the blocker above (cohesive-rewrite issues → `direct`).
+- **⏸️ Cost: consider Sonnet-only (drop Opus).** Opus (spec/plan/review) is the priciest tier and
+  Pavel flagged per-issue cost as too high for the app. Change is trivial — the three role→model
+  constants in `src/llm/models.ts` (triage=Haiku, implementation=Sonnet, review=Opus). **Before
+  cutting:** pull the actual `llm_calls` cost breakdown from a real run — Opus mostly hits the
+  low-token spec/plan/review calls, so it may be a small share of spend; consider keeping Opus on
+  *plan only*. Decide against measured data, not a guess.
+- **⏸️ CocoIndex disabled (needs review).** Got stuck during go-live; Pavel + CC disabled it to
+  proceed. Safe for now — per-run indexing was always the MVP nice-to-have, and the pipeline is
+  designed to run without it (plan-time retrieval degrades, nothing breaks). Related: the
+  state-guard / non-recoverable-transient-state issue noted above surfaced via this failure.
+  Revisit the sidecar (exact API surface + why it hung) before re-enabling.
+
 ## Locked decisions
 
 - Language: TypeScript throughout.
