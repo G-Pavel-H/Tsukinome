@@ -5,6 +5,12 @@ export interface Config {
   anthropicApiKey: string;
   databaseUrl: string;
   e2bApiKey: string;
+  /**
+   * Optional E2B template id/name for the code sandbox. The default E2B base image ships an old
+   * Node (< 20.12), which breaks `npm test` at import time for repos needing modern Node — set this
+   * to a custom template pinned to Node ≥ 22 (see e2b.Dockerfile / docs/setup.md). Unset → base image.
+   */
+  e2bTemplate?: string;
   port: number;
   /** Per-run budget ceiling in nano-USD. Default $1.00. Override via RUN_BUDGET_USD. */
   runBudgetNanoUsd: number;
@@ -45,6 +51,7 @@ export function loadConfig(): Config {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
     databaseUrl: process.env.DATABASE_URL!,
     e2bApiKey: process.env.E2B_API_KEY!,
+    e2bTemplate: process.env.E2B_TEMPLATE?.trim() || undefined,
     port: parseInt(process.env.PORT ?? '3000', 10),
     runBudgetNanoUsd: parseRunBudgetNanoUsd(process.env.RUN_BUDGET_USD),
   };

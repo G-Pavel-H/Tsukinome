@@ -35,7 +35,7 @@ async function main() {
   });
 
   const github = createProbotGitHubClient(probot);
-  const sandboxProvider = new E2BSandboxProvider(config.e2bApiKey);
+  const sandboxProvider = new E2BSandboxProvider(config.e2bApiKey, config.e2bTemplate);
   const gateway = new LlmGateway(new AnthropicProvider(config.anthropicApiKey), store, log);
   const codeIndex = new PgVectorCodeIndex(
     pool,

@@ -51,12 +51,30 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 | `WEBHOOK_SECRET` | yes | — | Must match the App's webhook secret. |
 | `ANTHROPIC_API_KEY` | yes | — | Model calls (Haiku/Sonnet/Opus). |
 | `E2B_API_KEY` | yes | — | Sandbox for clone + test runs. |
+| `E2B_TEMPLATE` | recommended | base image | Custom sandbox template pinned to Node ≥ 22 (see below). Without it, E2B's base image ships Node < 20.12 and `npm test` fails at import for modern-Node repos. |
 | `DATABASE_URL` | yes | — | Postgres connection string (pgvector-capable). |
 | `RUN_BUDGET_USD` | no | `1.00` | Per-run model-spend ceiling. |
 | `PORT` | no | `3000` | Webhook HTTP port. |
 
 > This environment's permission settings block editing `.env*` from the agent, so there is no
 > `.env.example` in the repo — use the table above as the source of truth.
+
+### Sandbox Node version (build the E2B template)
+
+The TDD loop runs the target repo's `npm test` inside an E2B microVM. E2B's **default base image
+ships an old Node** (< 20.12), so a suite that imports anything needing modern Node fails at *import
+time* — e.g. `node:util`'s `parseEnv` (Node ≥ 20.12) or `require()` of an ES module (Node ≥ 22.12) —
+and the loop can never observe green regardless of the implementation. Fix it once by building a
+template pinned to Node 22 (`e2b.Dockerfile` is in the repo root):
+
+```bash
+npm i -g @e2b/cli
+e2b auth login
+e2b template build --name tsukinome-node22 --dockerfile e2b.Dockerfile
+```
+
+Then set `E2B_TEMPLATE=tsukinome-node22` (or the printed template id). Leaving it unset falls back to
+the base image and is only safe for target repos that run on old Node.
 
 ## 4. Migrate and run
 

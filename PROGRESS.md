@@ -254,6 +254,22 @@ Keep this current. It's the source of truth for what's done and what's next.
   closes at 7d like the others. Dogfooded TDD (parks-not-fails, resume-to-green, `/abort`, cap-exceeded
   tests). 196 pass / 23 skip, typecheck + lint clean. **No migration** (reuses the `runs.context`
   jsonb). **Not yet run live.** Fix-loop (`handleFix`) escalation still dead-ends — deferred follow-up.
+- 2026-07-12 (post-go-live, sandbox Node): **Root cause of the *actual* live escalation — the E2B
+  sandbox runs an old Node, so `npm test` fails at import, not the model's code.** With the blind-retry
+  fix surfacing real test output, a live run's escalation comment showed the sandbox failing on
+  `test/app.test.ts` (`node:util` has no `parseEnv` → needs Node ≥ 20.12, via probot) and
+  `test/sandbox/e2b.integration.test.ts` (`require()` of ES-module chalk → needs Node ≥ 22.12, via the
+  e2b SDK). Both fail at **collection/import** time, so the whole suite is red no matter what the
+  implementer writes — un-greenable for a runtime reason no application code can fix (this is why
+  "Sonnet couldn't resolve it"). Cause: `E2BSandboxProvider.create` passed **no template**, so E2B
+  booted its default base image (Node < 20.12); local + CI are Node 22–23, which is why they're green.
+  Fix (founder chose the custom-template route): added `e2b.Dockerfile` (`FROM node:22`, full image so
+  git is present), a `template?` arg on `E2BSandboxProvider` wired from a new optional `E2B_TEMPLATE`
+  config, tightened `engines` to `>=22.12` + added `.nvmrc` (22), and documented the one-time
+  `e2b template build` in `docs/setup.md`. **Action still on the founder:** build the template with
+  their E2B account (`e2b template build --name tsukinome-node22 --dockerfile e2b.Dockerfile`) and set
+  `E2B_TEMPLATE`. 196 pass / 23 skip, typecheck + lint clean (the E2B path itself is gated, verified
+  live).
 - 2026-06-28 (Phase 11): **PgStore SQL (migration 008 + the five new methods) verified against a real `pgvector/pgvector:pg16` Postgres** — migrations applied clean (008 included) and all 13 gated PgStore tests pass, covering retry-backoff/dead-letter, lease recovery, stale listing + ping, and cost aggregation. They `skipIf(!DATABASE_URL)` so local `npm test` stays green with no DB; CI runs them too.
 
 ## Go-live (2026-07-12)

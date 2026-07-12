@@ -42,13 +42,21 @@ class E2BSandboxHandle implements SandboxHandle {
 }
 
 export class E2BSandboxProvider implements SandboxProvider {
-  constructor(private readonly apiKey: string) {}
+  /**
+   * @param apiKey   E2B API key.
+   * @param template Optional template id/name. Unset → E2B's base image (old Node); set to a
+   *                 Node ≥ 22 template (see e2b.Dockerfile) so `npm test` doesn't fail at import.
+   */
+  constructor(
+    private readonly apiKey: string,
+    private readonly template?: string,
+  ) {}
 
   async create(opts?: CreateSandboxOptions): Promise<SandboxHandle> {
-    const sandbox = await Sandbox.create({
-      apiKey: this.apiKey,
-      timeoutMs: opts?.timeoutMs,
-    });
+    const sandboxOpts = { apiKey: this.apiKey, timeoutMs: opts?.timeoutMs };
+    const sandbox = this.template
+      ? await Sandbox.create(this.template, sandboxOpts)
+      : await Sandbox.create(sandboxOpts);
     return new E2BSandboxHandle(sandbox);
   }
 }
