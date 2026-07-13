@@ -48,4 +48,25 @@ describe('renderCostSummary', () => {
     ]);
     expect(out).toContain('| review | 1 | 100/5 |');
   });
+
+  // AC9: duration is rendered via formatDuration, not as a raw millisecond number
+  it('renders duration via formatDuration output rather than raw milliseconds (AC9)', () => {
+    // renderCostSummary accepts a durationMs parameter and renders it in the summary.
+    // With 65000ms the formatted output should be "1m 5s", not "65000".
+    const out = renderCostSummary(
+      [call({ role: 'triage', inputTokens: 100, outputTokens: 20, costNanoUsd: 120_000 })],
+      65000,
+    );
+    expect(out).toContain('1m 5s');
+    expect(out).not.toContain('65000');
+  });
+
+  it('renders a short duration in ms format via formatDuration (AC9)', () => {
+    const out = renderCostSummary(
+      [call({ role: 'triage', costNanoUsd: 1 })],
+      820,
+    );
+    expect(out).toContain('820ms');
+    expect(out).not.toContain(' 820 ');
+  });
 });
