@@ -16,17 +16,17 @@ export function formatDuration(ms: number): string {
 
   const rounded = Math.round(ms);
 
-  if (rounded < 1000) {
+  if (rounded < 1_000) {
     return `${rounded}ms`;
   }
 
   if (rounded < 60_000) {
-    return `${Math.floor(rounded / 1000)}s`;
+    return `${Math.floor(rounded / 1_000)}s`;
   }
 
   if (rounded < 3_600_000) {
     const minutes = Math.floor(rounded / 60_000);
-    const seconds = Math.floor((rounded % 60_000) / 1000);
+    const seconds = Math.floor((rounded % 60_000) / 1_000);
     return `${minutes}m ${seconds}s`;
   }
 
