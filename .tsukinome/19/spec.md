@@ -18,7 +18,7 @@ Each requirement is tagged with a confidence level (explicit / inferred / assump
 - **R4** `[explicit]` For values from one second up to (but not including) one minute, the output is whole seconds followed by 's' (e.g., 5000 → '5s').
 - **R5** `[explicit]` For values from one minute up to (but not including) one hour, the output is 'Xm Ys' where X is whole minutes and Y is remaining whole seconds (e.g., 65000 → '1m 5s').
 - **R6** `[explicit]` For values of one hour or more, the output is 'Xh Ym' where X is whole hours and Y is remaining whole minutes, dropping seconds (e.g., 3600000 → '1h 0m').
-- **R7** `[explicit]` Sub-second values are rounded to whole milliseconds before formatting.
+- **R7** `[explicit]` Sub-second values are rounded to whole milliseconds before formatting, and rounding is applied before scale selection so that a value rounding up to exactly 1000ms is formatted at the seconds scale (e.g., 999.6 → '1s').
 - **R8** `[explicit]` Negative or non-finite input (NaN, Infinity, -Infinity) returns '0ms'.
 - **R9** `[explicit]` The utility module has accompanying unit tests.
 - **R10** `[explicit]` The cost summary display uses formatDuration to render durations instead of raw millisecond values.
@@ -77,6 +77,12 @@ Each requirement is tagged with a confidence level (explicit / inferred / assump
 
 ### AC9
 
+- **Given** formatDuration is called
+- **When** the argument is a fractional value that rounds up to exactly 1000ms, such as 999.6
+- **Then** it crosses into the seconds scale and returns '1s'
+
+### AC10
+
 - **Given** the run cost summary is rendered with a known duration in milliseconds
 - **When** the summary is displayed
 - **Then** the duration appears as the formatDuration output rather than a raw millisecond number
@@ -92,7 +98,7 @@ Each requirement is tagged with a confidence level (explicit / inferred / assump
 - Exactly 1000ms (boundary between ms and seconds scale).
 - Exactly 60000ms (boundary between seconds and minutes scale).
 - Exactly 3600000ms (boundary into hours scale).
-- Fractional millisecond input rounding up across a boundary (e.g., 999.6 → '1000ms' vs '1s').
+- Fractional millisecond input rounding up across a boundary (e.g., 999.6 rounds to 1000ms and is rendered as '1s').
 - Very large durations spanning many hours.
 - Non-numeric or undefined/null input passed at runtime despite the numeric type.
 
