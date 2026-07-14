@@ -49,6 +49,21 @@ Keep this current. It's the source of truth for what's done and what's next.
   **already-tested** output is un-greenable because the implementer can't edit existing tests — the
   loop could detect "my change broke a *pre-existing* test" and route back.)
 
+- **⏸️ Test Author is the most expensive stage — its big context is billed uncached (2026-07-13).**
+  Cost analysis flagged `test-author` as the top spender. Root cause: prompt caching only marks the
+  *system* prefix (`CONSTITUTION` + instruction file) in `src/agents/runner.ts:44`; the large
+  **user-message** payload it uniquely carries — full spec + plan + repo file map + two whole example
+  test files + test-runner config + import rules + whole current affected files (`src/pipeline/tdd.ts`
+  ~200–212) — has **no cache breakpoint**, so it's re-billed at full input price on every ladder
+  attempt (×`SONNET_ATTEMPTS`) and every task, though most of it is identical across all of them. The
+  prompt already appends the variable bits (`current files`, `feedback`) last, so a breakpoint fits
+  naturally. Same uncached payload hits the Implementer.
+  - **Suggestion:** extend `LlmRequest` messages to accept content blocks with `cacheControl` (mirror
+    the existing system-block handling in `anthropic-provider.ts`), then split the Test Author /
+    Implementer user message into a cached run-stable prefix (spec, plan, repo map, example tests,
+    conventions, import rule — reordered ahead of the per-task task header) + an uncached tail, and
+    trim example tests to import lines only. Behavior-neutral; watch `cache_read_tokens` rise.
+
 ## Locked decisions
 
 - Language: TypeScript throughout.
