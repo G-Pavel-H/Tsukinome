@@ -1,0 +1,23 @@
+# OPTIONAL — only needed if you distribute this pack via Microsoft's Agent Package Manager (APM).
+# Plain install is just copying the .github/ folder; see README.md. APM adds versioned, reproducible,
+# security-scanned distribution across Copilot / Claude / Cursor / etc. https://github.com/microsoft/apm
+#
+# The agent primitives themselves live in .github/agents/*.agent.md — APM discovers them there.
+
+name: tsukinome-copilot
+version: 0.1.0
+description: >-
+  Multi-agent, test-first workflow for GitHub Copilot in VS Code: spec → plan (you approve) →
+  decompose → TDD implement → self-review. Language-agnostic. Orchestrator delegates to specialist
+  custom agents.
+
+# This package ships only local primitives (the agents in .github/agents/) and needs no external
+# packages or MCP servers, so dependencies are empty. Consumers who want to pull THIS package into
+# their own project would instead add it under their apm: dependencies, e.g.:
+#
+#   dependencies:
+#     apm:
+#       - <your-org>/<your-repo>/copilot-tsukinome#v0.1.0
+dependencies:
+  apm: []
+  mcp: []
