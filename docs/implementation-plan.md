@@ -341,3 +341,27 @@ A person installs the GitHub App on a fresh repo, opens an issue, answers at mos
 - Single-tenant/self-host still works via the explicit platform-key fallback flag.
 
 **Open decisions (resolve before implementing):** key-intake mechanism (settings page vs repo secret); whether E2B is also BYO or stays platform-provided; whether to add usage metering/billing on top (separate phase).
+
+### Phase 13 — Multi-language support (beyond TypeScript/JavaScript)
+
+**The problem we're solving:** Today Tsukinome only works on TypeScript/JavaScript repos — it refuses everything else at the language gate. We want it to accept the general stack (Python, Java, C#, Go, and similar — broadly the languages CocoIndex/tree-sitter already understands, or at least most of them), so it can turn an issue into a test-first PR regardless of the repo's language.
+
+**Why it's not a rewrite (context):** The lock-in is concentrated and additive, not architectural. The main TS/JS assumptions live in a handful of places:
+- **Build/test execution** is hardcoded to the Node toolchain — `npm ci` + `npm test` in `src/sandbox/code-sandbox.ts` and `src/sandbox/run-tests.ts`. This is the core thing that must vary by language.
+- **The sandbox image** (`src/sandbox/e2b-sandbox.ts` + the template knob in `config.ts`) is a Node template so `npm test` runs; other languages need their runtime available.
+- **Project detection / repo map** (`src/pipeline/repo-map.ts`, and the test-runner config probe in `src/pipeline/tdd.ts`) reads `package.json` / vitest/jest config specifically.
+- **Agent prompts** (`agents/test-author.md`, implementer/architect/refactor) carry TS idioms (e.g. `vitest.config.ts`, `.test.ts` path conventions) that bias the models toward TypeScript.
+- **The language gate** (`SUPPORTED_LANGUAGES` in `src/worker/handlers.ts`) is a deliberate narrow guardrail.
+- **Good news — the code index is already language-agnostic:** the CocoIndex sidecar uses `detect_code_language()` + tree-sitter chunking and language-neutral embeddings; the only TS/JS-specific bit is the `SOURCE_EXT` extension filter (kept in sync between the sidecar and the fake index). Widening that list is most of the work at the retrieval layer.
+
+**Ideas for the solution (to refine — not final technical decisions):**
+- Introduce a single **`Toolchain` abstraction**: `detect(repo) → { language, installCmd, testCmd, testFileConventions, sandboxTemplate }`. Thread it through the sandbox runner (replacing the two hardcoded commands), the test-runner-config probe, the repo map, and the agent prompts.
+- Ship support as per-language **"language packs"**, each bundling: its install/test commands, the sandbox image/runtime it needs, its test-file conventions, prompt conventions to inject, and its source-file extensions. Add packs incrementally (start with Python, then Java/C#/Go).
+- **Parameterize the agent prompts by detected language** instead of hardcoding TS idioms — inject the pack's conventions as variables so the same roles work across languages.
+- **Sandbox images:** decide between per-language templates vs one image carrying multiple toolchains (the template id is already a config knob).
+- **Turn the language gate into a capability check** — "do we have a Toolchain/language pack for this repo's primary language?" — rather than a fixed TS/JS set. Keep refusing gracefully when there's no pack.
+- Extend the code index's `SOURCE_EXT` (sidecar + fake) to the supported languages.
+
+**Rough exit criteria (per language pack):** a repo in the target language, with its conventional test runner, goes issue → clarify/plan → **test-first, green PR** end to end; unsupported languages (no pack) are still refused gracefully; the TS/JS path is unchanged.
+
+**Open questions (to review with Claude Code CLI):** which language to do first; per-language sandbox templates vs one multi-toolchain image; how much the test-first loop's grain needs to change per ecosystem (test conventions differ a lot); interaction with the TDD-gate policy work (some ecosystems/issues may fit "direct" better than strict red→green).
