@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tsukinome — the moon's eye over your codebase</title>
+<meta name="description" content="Tsukinome turns a plain-English GitHub issue into a high-quality, test-first pull request — human-in-the-loop, token-lean, lightweight to adopt." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --bg:#06070f; --bg2:#0a0c1a; --panel:#0d1022;
+  --cyan:#38f2ff; --cyan-soft:#8ff7ff; --magenta:#ff3caa; --violet:#8f6bff;
+  --ink:#e8edfb; --muted:#9fb0d6; --dim:#6b7ba6; --line:rgba(120,150,220,.14);
+  --grad:linear-gradient(100deg,#38f2ff 0%,#8f6bff 52%,#ff3caa 100%);
+  --maxw:1120px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:'Inter',system-ui,sans-serif; line-height:1.65;
+  -webkit-font-smoothing:antialiased; overflow-x:hidden;
+}
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(720px 520px at 78% -8%, rgba(255,60,170,.14), transparent 60%),
+    radial-gradient(820px 620px at 12% 6%, rgba(56,242,255,.14), transparent 60%),
+    radial-gradient(900px 700px at 50% 108%, rgba(143,107,255,.12), transparent 60%);
+}
+.grid{
+  position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:46px 46px;
+  mask-image:radial-gradient(circle at 50% 30%,#000 0%,transparent 78%);
+}
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 28px; position:relative; z-index:1}
+a{color:inherit; text-decoration:none}
+
+nav{position:sticky; top:0; z-index:20; backdrop-filter:blur(12px); background:rgba(6,7,15,.6); border-bottom:1px solid var(--line)}
+nav .wrap{display:flex; align-items:center; justify-content:space-between; height:66px}
+.brand{display:flex; align-items:center; gap:12px; font-family:'Space Grotesk',sans-serif; font-weight:600; letter-spacing:.5px; font-size:18px}
+.brand svg{width:34px; height:34px}
+.brand b{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent}
+.nav-links{display:flex; gap:26px; align-items:center; font-size:14.5px; color:var(--muted)}
+.nav-links a{transition:color .2s}
+.nav-links a:hover{color:var(--cyan-soft)}
+.nav-cta{border:1px solid rgba(56,242,255,.4); padding:8px 16px; border-radius:10px; color:var(--cyan-soft)!important; transition:.2s}
+.nav-cta:hover{background:rgba(56,242,255,.1); box-shadow:0 0 22px rgba(56,242,255,.28)}
+@media(max-width:640px){.nav-links a:not(.nav-cta){display:none}}
+
+section{position:relative; z-index:1; padding:110px 0}
+.eyebrow{font-family:'JetBrains Mono',monospace; font-size:13px; letter-spacing:3px; text-transform:uppercase; color:var(--cyan); opacity:.85}
+
+.hero{padding:96px 0 84px; text-align:center}
+.hero .mark{width:210px; height:210px; margin:0 auto 26px; filter:drop-shadow(0 0 42px rgba(56,242,255,.25))}
+.kanji{font-family:'Space Grotesk',sans-serif; font-size:26px; letter-spacing:14px; color:var(--cyan); opacity:.85; margin-bottom:14px}
+.hero h1{font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:clamp(52px,10vw,120px); line-height:.98; letter-spacing:-2px; background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent}
+.hero .lede{font-size:clamp(19px,2.4vw,26px); color:var(--ink); margin:26px auto 8px; max-width:760px; font-weight:500}
+.hero .sub{font-size:clamp(15px,1.8vw,18px); color:var(--muted); max-width:660px; margin:0 auto 40px}
+.btns{display:flex; gap:16px; justify-content:center; flex-wrap:wrap}
+.btn{font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:15.5px; padding:14px 28px; border-radius:12px; transition:.22s; display:inline-flex; align-items:center; gap:9px}
+.btn-primary{background:var(--grad); color:#06070f; box-shadow:0 0 34px rgba(143,107,255,.35)}
+.btn-primary:hover{transform:translateY(-2px); box-shadow:0 0 46px rgba(143,107,255,.55)}
+.btn-ghost{border:1px solid var(--line); color:var(--ink)}
+.btn-ghost:hover{border-color:rgba(56,242,255,.5); color:var(--cyan-soft); box-shadow:0 0 24px rgba(56,242,255,.2)}
+
+.section-head{max-width:760px; margin-bottom:56px}
+.section-head h2{font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:clamp(32px,5vw,56px); letter-spacing:-1px; line-height:1.05; margin:14px 0 16px}
+.section-head p{color:var(--muted); font-size:clamp(16px,1.8vw,19px)}
+
+.flow{display:grid; grid-template-columns:repeat(3,1fr); gap:18px}
+@media(max-width:860px){.flow{grid-template-columns:1fr}}
+.step{background:linear-gradient(180deg,var(--panel),rgba(13,16,34,.4)); border:1px solid var(--line); border-radius:16px; padding:26px 24px; transition:.25s}
+.step:hover{border-color:rgba(56,242,255,.34); transform:translateY(-3px); box-shadow:0 14px 40px rgba(0,0,0,.4)}
+.step .n{font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--violet); letter-spacing:2px}
+.step h3{font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:600; margin:8px 0 8px}
+.step p{color:var(--muted); font-size:15.5px}
+.step .cmd{color:var(--cyan-soft); font-family:'JetBrains Mono',monospace}
+
+.fix{display:grid; grid-template-columns:repeat(3,1fr); gap:22px}
+@media(max-width:860px){.fix{grid-template-columns:1fr}}
+.card{background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:34px 30px; position:relative; overflow:hidden; transition:.25s}
+.card::before{content:""; position:absolute; inset:0 0 auto 0; height:2px; background:var(--grad); opacity:.7}
+.card:hover{transform:translateY(-4px); box-shadow:0 18px 50px rgba(0,0,0,.45); border-color:rgba(143,107,255,.34)}
+.card .tag{font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:var(--magenta)}
+.card h3{font-family:'Space Grotesk',sans-serif; font-size:24px; font-weight:600; margin:12px 0 12px; line-height:1.2}
+.card p{color:var(--muted); font-size:16px}
+.card b{color:var(--cyan-soft); font-weight:500}
+
+.stack{display:flex; flex-wrap:wrap; gap:14px; margin-top:8px}
+.chip{background:rgba(13,16,34,.7); border:1px solid var(--line); border-radius:12px; padding:16px 20px; min-width:200px; flex:1}
+.chip .k{font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:17px}
+.chip .v{color:var(--dim); font-size:14px; font-family:'JetBrains Mono',monospace; margin-top:3px}
+.chip .k span{color:var(--cyan)}
+.metrics{display:flex; gap:38px; flex-wrap:wrap; margin-top:44px; padding-top:34px; border-top:1px solid var(--line)}
+.metric .big{font-family:'Space Grotesk',sans-serif; font-size:clamp(30px,4vw,44px); font-weight:700; background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent}
+.metric .lbl{color:var(--muted); font-size:14.5px}
+
+.cta-band{text-align:center; padding:120px 0}
+.cta-band h2{font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:clamp(34px,6vw,68px); letter-spacing:-1.5px; line-height:1.02}
+.cta-band .kanji{margin-bottom:20px}
+.cta-band p{color:var(--muted); font-size:18px; max-width:560px; margin:18px auto 38px}
+
+footer{border-top:1px solid var(--line); padding:52px 0 70px; position:relative; z-index:1}
+footer .wrap{display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap}
+.foot-brand{display:flex; align-items:center; gap:12px; font-family:'Space Grotesk',sans-serif; font-weight:600}
+.foot-brand svg{width:30px;height:30px}
+.foot-links{display:flex; gap:24px; font-size:15px; color:var(--muted)}
+.foot-links a{transition:color .2s}
+.foot-links a:hover{color:var(--cyan-soft)}
+.copy{color:var(--dim); font-size:13.5px; font-family:'JetBrains Mono',monospace; margin-top:18px}
+
+.guide{display:flex; flex-direction:column; gap:16px}
+.gstep{display:grid; grid-template-columns:auto 1fr; gap:24px; background:linear-gradient(180deg,var(--panel),rgba(13,16,34,.4)); border:1px solid var(--line); border-radius:16px; padding:26px 30px; transition:.25s}
+.gstep:hover{border-color:rgba(56,242,255,.3); transform:translateY(-2px)}
+.gstep .idx{font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:28px; background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent; line-height:1.1; min-width:32px}
+.gstep h3{font-family:'Space Grotesk',sans-serif; font-size:21px; font-weight:600; margin-bottom:6px}
+.gstep p{color:var(--muted); font-size:15.5px}
+.gstep .opt{font-family:'JetBrains Mono',monospace; font-size:10.5px; letter-spacing:1.5px; text-transform:uppercase; color:var(--violet); border:1px solid rgba(143,107,255,.4); border-radius:20px; padding:3px 10px; margin-left:10px; vertical-align:middle; white-space:nowrap}
+.code{background:#070912; border:1px solid var(--line); border-radius:12px; padding:16px 18px; font-family:'JetBrains Mono',monospace; font-size:13.5px; color:var(--cyan-soft); overflow-x:auto; margin-top:15px; line-height:1.65; white-space:pre}
+.code .c{color:var(--dim)} .code .k{color:var(--magenta)} .code .cmd2{color:var(--cyan)}
+.reveal{opacity:0; transform:translateY(28px); transition:opacity .7s ease, transform .7s ease}
+.reveal.in{opacity:1; transform:none}
+</style>
+</head>
+<body>
+<div class="grid"></div>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><clipPath id="l0"><path d="M60 200 Q200 96 340 200 Q200 304 60 200 Z"/></clipPath><mask id="c0"><circle cx="200" cy="200" r="38" fill="#fff"/><circle cx="217" cy="187" r="36" fill="#000"/></mask></defs><rect x="0" y="0" width="400" height="400" rx="72" fill="#0b0e1e"/><path d="M60 200 Q200 96 340 200 Q200 304 60 200 Z" fill="none" stroke="#8ff7ff" stroke-width="6"/><g clip-path="url(#l0)"><circle cx="200" cy="200" r="90" fill="none" stroke="#ff56b8" stroke-width="4"/><circle cx="200" cy="200" r="38" fill="#bff9ff" mask="url(#c0)"/></g></svg>
+      <span>tsuki<b>nome</b></span>
+    </a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#fix">Why</a>
+      <a href="#stack">Stack</a>
+      <a href="#start">Get started</a>
+      <a class="nav-cta" href="https://github.com/G-Pavel-H/Github-Issue-Workflow-Automation">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<span id="top"></span>
+<header class="hero wrap">
+  <svg class="mark" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tsukinome mark">
+    <defs>
+      <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#1c3168" stop-opacity="0.6"/><stop offset="1" stop-color="#0c0f22" stop-opacity="0"/></radialGradient>
+      <mask id="cresc"><circle cx="200" cy="200" r="38" fill="#fff"/><circle cx="217" cy="187" r="36" fill="#000"/></mask>
+      <clipPath id="lens"><path d="M60 200 Q200 96 340 200 Q200 304 60 200 Z"/></clipPath>
+    </defs>
+    <rect x="0" y="0" width="400" height="400" rx="72" fill="#0a0c1c"/>
+    <circle cx="200" cy="200" r="175" fill="url(#halo)"/>
+    <circle cx="200" cy="200" r="150" fill="none" stroke="#ff3caa" stroke-width="1.2" stroke-opacity="0.32" stroke-dasharray="3 20"/>
+    <path d="M60 200 Q200 96 340 200 Q200 304 60 200 Z" fill="#0a1024" fill-opacity="0.7"/>
+    <path d="M60 200 Q200 96 340 200 Q200 304 60 200 Z" fill="none" stroke="#8ff7ff" stroke-width="2"/>
+    <g clip-path="url(#lens)">
+      <circle cx="200" cy="200" r="108" fill="none" stroke="#38f2ff" stroke-width="0.9" stroke-opacity="0.5" stroke-dasharray="1.5 13"/>
+      <circle cx="200" cy="200" r="90" fill="none" stroke="#ff56b8" stroke-width="1.8" stroke-opacity="0.9"/>
+      <circle cx="200" cy="200" r="70" fill="none" stroke="#38f2ff" stroke-width="0.9" stroke-opacity="0.55"/>
+      <circle cx="200" cy="200" r="52" fill="none" stroke="#8f6bff" stroke-width="0.9" stroke-opacity="0.6"/>
+      <circle cx="200" cy="200" r="38" fill="#bff9ff" mask="url(#cresc)"/>
+    </g>
+  </svg>
+  <div class="kanji">月ノ目</div>
+  <h1>tsukinome</h1>
+  <p class="lede">The moon's eye over your codebase.</p>
+  <p class="sub">A GitHub-native agent that turns a plain-English issue into a high-quality, test-first pull request — with you in the loop at every gate.</p>
+  <div class="btns">
+    <a class="btn btn-primary" href="https://github.com/G-Pavel-H/Github-Issue-Workflow-Automation">View on GitHub</a>
+    <a class="btn btn-ghost" href="https://www.linkedin.com/in/your-handle">Connect on LinkedIn</a>
+  </div>
+</header>
+
+<section id="how">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="eyebrow">The pipeline</span>
+      <h2>From an issue to a reviewed PR.</h2>
+      <p>You describe the change in plain English. Tsukinome does the rest — and stops for you at the moments that matter.</p>
+    </div>
+    <div class="flow">
+      <div class="step reveal"><div class="n">01</div><h3>Spec</h3><p>Drafts a functional spec with testable acceptance criteria, committed to the repo.</p></div>
+      <div class="step reveal"><div class="n">02</div><h3>Clarify</h3><p>Asks one batched set of questions — only when something genuinely can't be inferred.</p></div>
+      <div class="step reveal"><div class="n">03</div><h3>Plan</h3><p>Commits an implementation plan and waits. You reply <span class="cmd">/approve</span> before any code is written.</p></div>
+      <div class="step reveal"><div class="n">04</div><h3>Build</h3><p>Implements test-first — red → green → refactor, one commit per task, in an isolated sandbox.</p></div>
+      <div class="step reveal"><div class="n">05</div><h3>Review</h3><p>Self-reviews the diff, then opens a pull request with the spec, plan, and tests attached.</p></div>
+      <div class="step reveal"><div class="n">06</div><h3>Iterate</h3><p>Actionable PR review comments trigger a bounded, test-first fix loop — never runaway.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="fix">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="eyebrow">What we're fixing</span>
+      <h2>The agent workflow, done right.</h2>
+      <p>Most code agents are fire-and-forget scripts that dump your whole repo into a context window. Tsukinome is built on three deliberate choices.</p>
+    </div>
+    <div class="fix">
+      <div class="card reveal">
+        <span class="tag">Human-in-the-loop</span>
+        <h3>A GitHub App, not a GitHub Action.</h3>
+        <p>Runs on a persistent backend, so a run can <b>suspend and resume across human gates</b> — clarify, approve, review — for days. A stateless Action can't hold that state. You approve the plan before a single line is written.</p>
+      </div>
+      <div class="card reveal">
+        <span class="tag">Token-lean</span>
+        <h3>Retrieval, not repo dumps.</h3>
+        <p>CocoIndex + pgvector give the agents <b>semantic retrieval of just the relevant code</b>, instead of stuffing the whole repo into the prompt. Model tiering — Haiku, Sonnet, Opus — plus prompt caching keep every run cheap and metered.</p>
+      </div>
+      <div class="card reveal">
+        <span class="tag">Lightweight</span>
+        <h3>Install once. No config.</h3>
+        <p>No per-repo config files, no workflow YAML, no CI wiring. <b>Install the GitHub App once</b> and open an issue — it just works, on any supported repo.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="stack">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="eyebrow">Under the hood</span>
+      <h2>A disciplined, modern stack.</h2>
+      <p>Every external dependency sits behind an interface with a real implementation and a fake — the whole pipeline is unit-tested without a single key.</p>
+    </div>
+    <div class="stack reveal">
+      <div class="chip"><div class="k">Type<span>Script</span></div><div class="v">end to end</div></div>
+      <div class="chip"><div class="k">GitHub <span>App</span></div><div class="v">Probot + Octokit</div></div>
+      <div class="chip"><div class="k">Postgres <span>· Neon</span></div><div class="v">state + pgvector</div></div>
+      <div class="chip"><div class="k">Coco<span>Index</span></div><div class="v">tree-sitter semantic index</div></div>
+      <div class="chip"><div class="k">E2B <span>sandbox</span></div><div class="v">ephemeral microVMs</div></div>
+      <div class="chip"><div class="k">Anthropic <span>Claude</span></div><div class="v">Haiku / Sonnet / Opus</div></div>
+    </div>
+    <div class="metrics reveal">
+      <div class="metric"><div class="big">Test-first</div><div class="lbl">TDD is a hard mechanical gate</div></div>
+      <div class="metric"><div class="big">$/run</div><div class="lbl">every call metered, budget-capped</div></div>
+      <div class="metric"><div class="big">Zero-config</div><div class="lbl">install the App, open an issue</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <div class="section-head reveal">
+      <span class="eyebrow">Get started</span>
+      <h2>Up and running in minutes.</h2>
+      <p>No workflow files, no CI wiring. Install the App, open an issue, and stay in control of every gate.</p>
+    </div>
+    <div class="guide">
+      <div class="gstep reveal">
+        <div class="idx">1</div>
+        <div class="body">
+          <h3>Install the GitHub App</h3>
+          <p>One click from the GitHub Marketplace. Pick the repositories you want Tsukinome to work on — it needs read/write on issues, pull requests, and contents. No files added to your repo.</p>
+        </div>
+      </div>
+      <div class="gstep reveal">
+        <div class="idx">2</div>
+        <div class="body">
+          <h3>Add a config <span class="opt">optional · recommended</span></h3>
+          <p>Zero-config works out of the box — Tsukinome auto-detects your toolchain. Drop a <code>.tsukinome/config.yml</code> to remove any guesswork or to support more ecosystems explicitly.</p>
+          <div class="code"><span class="c"># .tsukinome/config.yml — optional</span>
+<span class="k">language:</span> typescript
+<span class="k">install:</span> npm ci
+<span class="k">test:</span> npm test</div>
+        </div>
+      </div>
+      <div class="gstep reveal">
+        <div class="idx">3</div>
+        <div class="body">
+          <h3>Open an issue</h3>
+          <p>Describe the change in plain English — a bug, a small feature, a refactor. Tsukinome acknowledges it, then drafts a spec with testable acceptance criteria.</p>
+        </div>
+      </div>
+      <div class="gstep reveal">
+        <div class="idx">4</div>
+        <div class="body">
+          <h3>Answer any questions</h3>
+          <p>If something genuinely can't be inferred, it asks one batched set of clarifying questions right in the issue thread. Reply, and it refines the spec.</p>
+        </div>
+      </div>
+      <div class="gstep reveal">
+        <div class="idx">5</div>
+        <div class="body">
+          <h3>Approve the plan</h3>
+          <p>It commits an implementation plan and waits. Nothing gets built until you say so.</p>
+          <div class="code"><span class="cmd2">/approve</span>   <span class="c"># start implementation</span>
+<span class="cmd2">/abort</span>    <span class="c"># stop and close out</span>
+<span class="c"># …or just describe what to change</span></div>
+        </div>
+      </div>
+      <div class="gstep reveal">
+        <div class="idx">6</div>
+        <div class="body">
+          <h3>Review &amp; merge the PR</h3>
+          <p>A self-reviewed, test-first pull request lands — spec, plan, and tests attached, with a per-run cost summary. Leave review comments for a bounded fix loop, or merge.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta-band">
+  <div class="wrap reveal">
+    <div class="kanji">月ノ目</div>
+    <h2>Let the moon's eye<br/>watch your repo.</h2>
+    <p>An experiment in agentic engineering that keeps humans in command.</p>
+    <div class="btns">
+      <a class="btn btn-primary" href="https://github.com/G-Pavel-H/Github-Issue-Workflow-Automation">Explore the code</a>
+      <a class="btn btn-ghost" href="https://www.linkedin.com/in/your-handle">Connect on LinkedIn</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <a class="foot-brand" href="#top">
+      <svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><clipPath id="l1"><path d="M60 200 Q200 96 340 200 Q200 304 60 200 Z"/></clipPath><mask id="c1"><circle cx="200" cy="200" r="38" fill="#fff"/><circle cx="217" cy="187" r="36" fill="#000"/></mask></defs><rect x="0" y="0" width="400" height="400" rx="72" fill="#0b0e1e"/><path d="M60 200 Q200 96 340 200 Q200 304 60 200 Z" fill="none" stroke="#8ff7ff" stroke-width="6"/><g clip-path="url(#l1)"><circle cx="200" cy="200" r="90" fill="none" stroke="#ff56b8" stroke-width="4"/><circle cx="200" cy="200" r="38" fill="#bff9ff" mask="url(#c1)"/></g></svg>
+      <span>tsukinome</span>
+    </a>
+    <div class="foot-links">
+      <a href="https://github.com/G-Pavel-H/Github-Issue-Workflow-Automation">GitHub</a>
+      <a href="https://www.linkedin.com/in/your-handle">LinkedIn</a>
+      <a href="mailto:ghazaryan.pavel@gmail.com">Email</a>
+    </div>
+  </div>
+  <div class="wrap"><div class="copy">月ノ目 · tsukinome — built by Pavel Ghazaryan · © 2026</div></div>
+</footer>
+
+<script>
+const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.14});
+document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=(i%3*70)+'ms';io.observe(el)});
+</script>
+</body>
+</html>
