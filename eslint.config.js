@@ -20,6 +20,7 @@ export default [
         setInterval: 'readonly',
         clearInterval: 'readonly',
         URL: 'readonly',
+        URLSearchParams: 'readonly',
         NodeJS: 'readonly',
         fetch: 'readonly',
         Buffer: 'readonly',

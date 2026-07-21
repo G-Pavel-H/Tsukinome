@@ -35,6 +35,15 @@ export interface Config {
    * PATH; if that lacks the deps, code retrieval degrades gracefully (best-effort, plans from spec).
    */
   cocoindexPython?: string;
+  /**
+   * Phase 12b setup page (OAuth). All three are optional and enable the bring-your-own-key
+   * setup page together; when any is unset, `/setup` renders a "not configured" page and the
+   * rest of the app runs unaffected (e.g. an operator relying on `ALLOW_PLATFORM_KEY_FALLBACK`).
+   */
+  githubClientId?: string;
+  githubClientSecret?: string;
+  /** Public base URL of this deployment (no trailing slash), for OAuth redirects + setup links. */
+  setupBaseUrl?: string;
   port: number;
   /** Per-run budget ceiling in nano-USD. Default $1.00. Override via RUN_BUDGET_USD. */
   runBudgetNanoUsd: number;
@@ -93,6 +102,9 @@ export function loadConfig(): Config {
     e2bApiKey: process.env.E2B_API_KEY!,
     e2bTemplate: process.env.E2B_TEMPLATE?.trim() || undefined,
     cocoindexPython: process.env.COCOINDEX_PYTHON?.trim() || undefined,
+    githubClientId: process.env.GITHUB_CLIENT_ID?.trim() || undefined,
+    githubClientSecret: process.env.GITHUB_CLIENT_SECRET?.trim() || undefined,
+    setupBaseUrl: process.env.SETUP_BASE_URL?.trim().replace(/\/+$/, '') || undefined,
     port: parseInt(process.env.PORT ?? '3000', 10),
     runBudgetNanoUsd: parseRunBudgetNanoUsd(process.env.RUN_BUDGET_USD),
   };

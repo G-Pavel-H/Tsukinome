@@ -12,7 +12,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
-secrets/
+# Anchored to the repo root so it ignores a top-level secrets/ dir WITHOUT swallowing the
+# `src/secrets/` source directory (crypto/vault/validator live there).
+/secrets/
 *.pem
 *.key
 

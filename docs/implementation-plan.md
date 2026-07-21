@@ -408,13 +408,54 @@ fallback flag. No user-facing web surface (that's 12b). E2B and the DB pool are 
   unit-tested the purge *mechanism*; 12b connects the webhook). No auto-resume — a missing-key refusal
   is terminal for the run; re-trigger after setup.
 
-#### Phase 12b — OAuth setup page (the new web surface)
+#### Phase 12b — OAuth setup page (the new web surface) ✅
 
 Serve the Setup URL redirect + GitHub OAuth callback on the existing server; verify via OAuth that
 the user manages the installation (`GET /user/installations`) before accepting a key; validate the
 pasted key against Anthropic; encrypt + store (via the 12a vault); re-visitable to rotate; wire the
 `installation.deleted` webhook to `vault.purge`. Exit = a verified installation manager can set/rotate
 their key, an unauthorized user is rejected, and a real run uses the stored key.
+
+- **Built:**
+  - **Flow** (`src/web/setup-handlers.ts`, the testable core as pure functions returning a typed
+    `SetupResult`): `GET /setup?installation_id=X` → mint a one-time OAuth `state` bound to X →
+    redirect to GitHub authorize. `GET /setup/callback` → exchange code → `GET /user/installations`
+    → **only** if X is among them, create a session (httpOnly `SameSite=Lax` cookie) + render the key
+    form; else **403**. `POST /setup/key` → re-check ownership against the **session** (never a hidden
+    field), validate the key live, then `vault.setAnthropicKey` (upsert = rotation). The session holds
+    only the verified installation ids — the OAuth token is used once and discarded.
+  - **GitHub OAuth client** (`src/github/oauth.ts`): `GitHubOAuthClient` interface + pure
+    `buildAuthorizeUrl` + `HttpGitHubOAuthClient` (global `fetch`; thin external adapter, verified
+    live, not in CI).
+  - **Key validation** (`src/secrets/anthropic-validator.ts`): `AnthropicKeyValidator` type + real
+    impl = one free `models.list()` call (401 → false; transient errors propagate so a good key isn't
+    wrongly rejected). Injected → handlers unit-test with a fake, never hitting the network.
+  - **Session store** (`src/web/session-store.ts`): in-memory, TTL-bounded state + session maps
+    (single-process is a locked decision); `now` injectable for expiry tests.
+  - **HTTP adapter** (`src/web/setup-server.ts`) + **self-contained HTML** (`src/web/setup-pages.ts`,
+    inline styles, no external assets). `createServer` now composes health → setup middleware → webhook
+    middleware → 404 (both middlewares optional, backwards-compatible).
+  - **Uninstall purge** (`src/app.ts`): `installation.deleted` → `vault.purge`, deduped like the other
+    webhooks.
+  - **Refusal now links to setup** (`src/worker/worker.ts`): the 12a missing-key comment includes
+    `${SETUP_BASE_URL}/setup?installation_id=<id>` when a base URL is configured.
+  - **Config** (`src/config.ts`): `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SETUP_BASE_URL` — all
+    **optional**; when any is unset the setup page returns a "not configured" notice and the rest of the
+    app is unaffected (an operator on `ALLOW_PLATFORM_KEY_FALLBACK` needs none). Decided 2026-07-21:
+    optional-with-graceful-degradation over hard-required, so the dogfooding deploy needs no new vars.
+  - **Docs** (`docs/setup.md`): brought current for the whole BYO feature (12a + 12b) — the App's OAuth
+    Setup/Callback URLs + `installation` event, the new env vars (incl. the 12a `MASTER_ENCRYPTION_KEY`
+    / `ALLOW_PLATFORM_KEY_FALLBACK` that weren't yet documented), and a "Bring-your-own-key" subsection.
+- **TDD (all CI-tested with fakes):** the full ownership/validation/storage decision tree
+  (unauthorized user → 403 + nothing stored; invalid key → rejected + nothing stored; valid → stored;
+  rotation; expired/missing session → rejected); `buildAuthorizeUrl`; session TTL/one-time-state;
+  `installation.deleted` → purge (+ dedupe); the new config vars; the refusal-links-to-setup comment.
+  The real `HttpGitHubOAuthClient` + `anthropicKeyValidator` are thin external adapters (verified live,
+  not in CI — same posture as `AnthropicProvider`/E2B), as is the raw req/res socket glue. Full suite
+  **281 pass / 24 skipped**, typecheck + lint clean.
+- **Not verified live:** no real OAuth round-trip / two-installation concurrent run this session — needs
+  a deployed host with the App's OAuth configured. Verify the end-to-end set-key → run-uses-stored-key
+  path there.
 
 ### Phase 13 — Multi-language support (beyond TypeScript/JavaScript)
 

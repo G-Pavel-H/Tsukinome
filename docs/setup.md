@@ -9,7 +9,11 @@ You install it **once** as a GitHub App; target repos need **no config files**.
 - A Postgres database with the **pgvector** extension available (Neon works; locally,
   `pgvector/pgvector:pg16` is the easiest). Tsukinome runs `CREATE EXTENSION vector` in a
   migration, so the extension must be installable.
-- An **Anthropic API key** (model calls).
+- An **Anthropic API key** (model calls). With the bring-your-own-key setup page enabled
+  (Phase 12), each installation supplies **its own** key and the operator key is optional — see
+  "Bring-your-own-key" below.
+- A **32-byte master encryption key** (`MASTER_ENCRYPTION_KEY`) for encrypting stored keys at rest —
+  generate with `openssl rand -base64 32`.
 - An **E2B API key** (ephemeral sandbox that clones the repo and runs its tests).
 - (Optional, for the code index) Python 3 with the CocoIndex sidecar deps installed in a venv —
   see "Code index" below. The core pipeline runs without it; it powers richer plan-time retrieval.
@@ -30,6 +34,15 @@ GitHub → **Settings → Developer settings → GitHub Apps → New GitHub App*
   - **Issue comment** (`issue_comment.created` — clarification + plan-gate replies)
   - **Pull request review** (`pull_request_review.submitted` — `changes_requested`)
   - **Pull request review comment** (`pull_request_review_comment.created` — inline fixes)
+  - **Installation** (`installation.deleted` — purge the installation's stored key on uninstall)
+- **Bring-your-own-key setup page (optional but recommended — Phase 12b):**
+  - **Setup URL:** `https://<your-host>/setup` and tick **Redirect on update** so a fresh install
+    lands there with its `installation_id`.
+  - **Callback URL:** `https://<your-host>/setup/callback` (the OAuth return).
+  - Generate a **client secret** under the App's OAuth section. The **Client ID** + secret become
+    `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`; the public origin becomes `SETUP_BASE_URL`.
+  - This lets an installation manager paste **their own** Anthropic key, verified via GitHub OAuth.
+    Leave these unset to run without the page (see "Bring-your-own-key" below).
 
 After creating it:
 
@@ -49,7 +62,12 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 | `APP_ID` | yes | — | From the App settings page. |
 | `PRIVATE_KEY` | yes | — | The full `.pem` contents (newlines preserved). |
 | `WEBHOOK_SECRET` | yes | — | Must match the App's webhook secret. |
-| `ANTHROPIC_API_KEY` | yes | — | Model calls (Haiku/Sonnet/Opus). |
+| `MASTER_ENCRYPTION_KEY` | yes | — | Base64, decodes to **32 bytes** (`openssl rand -base64 32`). Encrypts per-installation keys at rest (AES-256-GCM). |
+| `ANTHROPIC_API_KEY` | fallback only | — | Operator/platform key. **Optional** under BYO; required only when `ALLOW_PLATFORM_KEY_FALLBACK=true`. |
+| `ALLOW_PLATFORM_KEY_FALLBACK` | no | `false` | When `true`, installations with no key on file use the operator `ANTHROPIC_API_KEY` (self-host / dogfooding). Off → missing keys are refused, never billed to the operator. |
+| `GITHUB_CLIENT_ID` | setup page | — | GitHub App OAuth client id (enables the setup page). |
+| `GITHUB_CLIENT_SECRET` | setup page | — | GitHub App OAuth client secret. |
+| `SETUP_BASE_URL` | setup page | — | Public origin (no trailing slash), e.g. `https://tsk.example.com`. Used for OAuth redirects + setup links. |
 | `E2B_API_KEY` | yes | — | Sandbox for clone + test runs. |
 | `E2B_TEMPLATE` | recommended | base image | Custom sandbox template pinned to Node ≥ 22 (see below). Without it, E2B's base image ships Node < 20.12 and `npm test` fails at import for modern-Node repos. |
 | `DATABASE_URL` | yes | — | Postgres connection string (pgvector-capable). |
@@ -59,6 +77,23 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 
 > This environment's permission settings block editing `.env*` from the agent, so there is no
 > `.env.example` in the repo — use the table above as the source of truth.
+
+### Bring-your-own-key (per-installation Anthropic key)
+
+As of Phase 12, model spend is billed to **each installation's own Anthropic key**, resolved
+per run and encrypted at rest (E2B and the database stay operator-owned). There are two ways to
+supply keys:
+
+- **Setup page (recommended).** Set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `SETUP_BASE_URL`,
+  and configure the App's Setup + Callback URLs (above). After installing, the manager is sent to
+  `/setup`, signs in with GitHub (which proves they manage the installation), pastes their Anthropic
+  key — validated live before storing — and can re-visit any time to rotate it. Uninstalling purges
+  the key automatically. If a run starts before a key is set, Tsukinome refuses gracefully with a
+  comment linking to the setup page (no tokens spent).
+- **Operator fallback (self-host / dogfooding).** Leave the setup page unset, set
+  `ALLOW_PLATFORM_KEY_FALLBACK=true`, and provide the operator `ANTHROPIC_API_KEY`. Every installation
+  then uses that one key — the pre-Phase-12 behaviour. With the page unset and fallback off, `/setup`
+  renders a "not configured" notice and runs without a key are refused.
 
 ### Sandbox Node version (build the E2B template)
 
