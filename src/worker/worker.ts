@@ -34,6 +34,8 @@ export interface WorkerDeps {
   log: Logger;
   /** Optional per-run budget ceiling (nano-USD); defaults to the DB column default if unset. */
   runBudgetNanoUsd?: number;
+  /** Public base URL of the deployment (Phase 12b); used to link the setup page in refusals. */
+  setupBaseUrl?: string;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -94,11 +96,18 @@ const DEAD_LETTER_COMMENT =
   "couldn't recover, so I've halted this run to avoid looping. Re-open or re-trigger the " +
   'issue to try again — no partial changes were merged.';
 
-const MISSING_KEY_COMMENT =
-  "🔑 **Tsukinome needs this installation's own Anthropic API key.** I stopped before making " +
-  'any model calls because no key is on file for this installation. Add your Anthropic API key ' +
-  'in the Tsukinome setup page, then re-open or re-trigger this issue to run — no charges were ' +
-  'incurred and no changes were made.';
+/** The refusal comment; links straight to this installation's setup page when a base URL is set. */
+function missingKeyComment(installationId: number, setupBaseUrl?: string): string {
+  const link = setupBaseUrl
+    ? ` Add your Anthropic API key here: ${setupBaseUrl}/setup?installation_id=${installationId} — then`
+    : ' Add your Anthropic API key in the Tsukinome setup page, then';
+  return (
+    "🔑 **Tsukinome needs this installation's own Anthropic API key.** I stopped before making " +
+    'any model calls because no key is on file for this installation.' +
+    link +
+    ' re-open or re-trigger this issue to run — no charges were incurred and no changes were made.'
+  );
+}
 
 /**
  * A missing per-installation key (Phase 12) is not a transient error — retrying won't
@@ -119,7 +128,10 @@ async function refuseForMissingKey(
   );
   // Best-effort: a failure to comment must not crash the worker loop.
   try {
-    await deps.github.postIssueComment({ ...coords, body: MISSING_KEY_COMMENT });
+    await deps.github.postIssueComment({
+      ...coords,
+      body: missingKeyComment(err.installationId, deps.setupBaseUrl),
+    });
   } catch (commentErr) {
     const m = commentErr instanceof Error ? commentErr.message : String(commentErr);
     deps.log.error({ jobId: job.id, err: m }, 'Failed to post missing-key comment');

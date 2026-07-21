@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { randomBytes } from 'node:crypto';
 import { Probot, ProbotOctokit } from 'probot';
 import { createApp } from '../src/app.js';
 import { InMemoryStore } from '../src/store/memory-store.js';
+import { CredentialVault } from '../src/secrets/credential-vault.js';
 import { RunState, type RunKey } from '../src/store/types.js';
 import { silentLog } from './helpers.js';
 
@@ -23,7 +25,7 @@ const TEST_PRIVATE_KEY =
   'VQCTMXxw4e3Bt7TXx/fTTTMm0fKxsEoZ2lv+NfR+L8QR6LON/wJHnOkCgYEA6J7r\n' +
   '-----END RSA PRIVATE KEY-----\n';
 
-function buildProbot(store: InMemoryStore): Probot {
+function buildProbot(store: InMemoryStore, vault?: CredentialVault): Probot {
   const probot = new Probot({
     appId: 1,
     privateKey: TEST_PRIVATE_KEY,
@@ -35,7 +37,9 @@ function buildProbot(store: InMemoryStore): Probot {
     }),
   });
   // Load with the app factory bound to our in-memory store.
-  void probot.load(createApp({ store, log: silentLog }));
+  void probot.load(
+    createApp({ store, vault: vault ?? new CredentialVault(store, randomBytes(32)), log: silentLog }),
+  );
   return probot;
 }
 
@@ -81,6 +85,47 @@ describe('createApp — issues.opened', () => {
 
     expect(await store.claimNextJob()).not.toBeNull();
     expect(await store.claimNextJob()).toBeNull();
+  });
+});
+
+function installationDeletedPayload() {
+  return {
+    action: 'deleted',
+    installation: { id: 7, account: { login: 'acme' } },
+  } as const;
+}
+
+describe('createApp — installation.deleted (Phase 12b uninstall purge)', () => {
+  let store: InMemoryStore;
+
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it("purges the installation's stored key on uninstall", async () => {
+    const vault = new CredentialVault(store, randomBytes(32));
+    const purge = vi.spyOn(vault, 'purge');
+    const probot = buildProbot(store, vault);
+
+    await probot.receive({
+      id: 'uninstall-1',
+      name: 'installation',
+      payload: installationDeletedPayload() as never,
+    });
+
+    expect(purge).toHaveBeenCalledWith(7);
+  });
+
+  it('ignores a duplicate uninstall delivery', async () => {
+    const vault = new CredentialVault(store, randomBytes(32));
+    const purge = vi.spyOn(vault, 'purge');
+    const probot = buildProbot(store, vault);
+
+    const payload = installationDeletedPayload() as never;
+    await probot.receive({ id: 'uninstall-dup', name: 'installation', payload });
+    await probot.receive({ id: 'uninstall-dup', name: 'installation', payload });
+
+    expect(purge).toHaveBeenCalledTimes(1);
   });
 });
 

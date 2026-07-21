@@ -30,7 +30,17 @@ describe('processNextJob — missing installation key', () => {
       silentLog,
     );
     const github = fakeGitHub({ language: 'TypeScript' });
-    const deps = { store, github, sandboxProvider, gateway, codeIndex, cloneRepo, openSandbox, log: silentLog };
+    const deps = {
+      store,
+      github,
+      sandboxProvider,
+      gateway,
+      codeIndex,
+      cloneRepo,
+      openSandbox,
+      log: silentLog,
+      setupBaseUrl: 'https://tsk.example.com',
+    };
 
     const job = await store.enqueueJob({ type: 'produce_spec', payload });
     const processed = await processNextJob(deps);
@@ -46,6 +56,8 @@ describe('processNextJob — missing installation key', () => {
     expect(comment.issueNumber).toBe(42);
     expect(comment.body.toLowerCase()).toContain('anthropic');
     expect(comment.body.toLowerCase()).toContain('key');
+    // The refusal links straight to this installation's setup page (Phase 12b).
+    expect(comment.body).toContain('https://tsk.example.com/setup?installation_id=7');
 
     // Nothing was billed.
     expect((await store.getLlmCalls(run!.id))).toHaveLength(0);

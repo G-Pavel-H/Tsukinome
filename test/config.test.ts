@@ -23,6 +23,9 @@ describe('loadConfig', () => {
     delete process.env.PORT;
     delete process.env.RUN_BUDGET_USD;
     delete process.env.ALLOW_PLATFORM_KEY_FALLBACK;
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
+    delete process.env.SETUP_BASE_URL;
   });
 
   afterEach(() => {
@@ -147,5 +150,26 @@ describe('loadConfig', () => {
   it('treats a blank COCOINDEX_PYTHON as unset', () => {
     Object.assign(process.env, validEnv, { COCOINDEX_PYTHON: '   ' });
     expect(loadConfig().cocoindexPython).toBeUndefined();
+  });
+
+  it('leaves the setup-page OAuth config undefined when unset (optional)', () => {
+    Object.assign(process.env, validEnv);
+    const config = loadConfig();
+    expect(config.githubClientId).toBeUndefined();
+    expect(config.githubClientSecret).toBeUndefined();
+    expect(config.setupBaseUrl).toBeUndefined();
+  });
+
+  it('parses the setup-page OAuth config when provided', () => {
+    Object.assign(process.env, validEnv, {
+      GITHUB_CLIENT_ID: 'Iv1.abc',
+      GITHUB_CLIENT_SECRET: 'shh',
+      SETUP_BASE_URL: 'https://tsk.example.com/',
+    });
+    const config = loadConfig();
+    expect(config.githubClientId).toBe('Iv1.abc');
+    expect(config.githubClientSecret).toBe('shh');
+    // A trailing slash is trimmed so `${base}/setup` never doubles up.
+    expect(config.setupBaseUrl).toBe('https://tsk.example.com');
   });
 });

@@ -2,9 +2,12 @@ import type { Probot } from 'probot';
 import type { Logger } from './log.js';
 import { RunState, type Store } from './store/types.js';
 import { issueNumberFromBranch } from './github/integrator.js';
+import type { CredentialVault } from './secrets/credential-vault.js';
 
 export interface AppDeps {
   store: Store;
+  /** Phase 12b: used to purge a stored key when its installation is uninstalled. */
+  vault: CredentialVault;
   log: Logger;
 }
 
@@ -14,9 +17,25 @@ export interface AppDeps {
  * happens in the worker. Probot handles signature verification and the response.
  */
 export function createApp(deps: AppDeps): (probot: Probot) => void {
-  const { store, log } = deps;
+  const { store, vault, log } = deps;
 
   return (probot: Probot): void => {
+    // Phase 12b: purge the installation's stored Anthropic key on uninstall.
+    probot.on('installation.deleted', async (context) => {
+      const deliveryId = context.id;
+      const installationId = context.payload.installation.id;
+
+      // Dedupe redelivered webhooks so purge runs at most once per delivery.
+      if (!(await store.tryMarkEventProcessed(deliveryId))) {
+        log.info({ deliveryId, installationId }, 'Duplicate installation.deleted delivery; ignoring');
+        return;
+      }
+
+      await vault.purge(installationId);
+      log.info({ deliveryId, installationId }, 'Purged stored key for uninstalled installation');
+    });
+
+
     probot.on('issues.opened', async (context) => {
       const deliveryId = context.id;
       const repository = context.payload.repository;

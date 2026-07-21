@@ -11,6 +11,9 @@ import { AnthropicProvider } from './llm/anthropic-provider.js';
 import { LlmGateway } from './llm/gateway.js';
 import { buildProviderResolver } from './llm/provider-resolver.js';
 import { CredentialVault } from './secrets/credential-vault.js';
+import { HttpGitHubOAuthClient } from './github/oauth.js';
+import { anthropicKeyValidator } from './secrets/anthropic-validator.js';
+import { createSetupMiddleware, type SetupServerDeps } from './web/setup-server.js';
 import { PgVectorCodeIndex } from './index/pgvector-code-index.js';
 import { CocoIndexSidecarRunner, SidecarEmbeddingProvider } from './index/cocoindex-runner.js';
 import { cloneToTempDir } from './index/checkout.js';
@@ -53,14 +56,40 @@ async function main() {
     new SidecarEmbeddingProvider({ python: config.cocoindexPython }),
     new CocoIndexSidecarRunner(config.databaseUrl, { python: config.cocoindexPython }),
   );
-  const app = createApp({ store, log });
+  const app = createApp({ store, vault, log });
 
   const webhookMiddleware = await createNodeMiddleware(app, {
     probot,
     webhooksPath: '/api/github/webhooks',
   });
 
-  const server = createServer(webhookMiddleware);
+  // Phase 12b: the setup page is enabled only when OAuth + base URL are all configured;
+  // otherwise `/setup` renders a "not configured" page and the rest of the app is unaffected.
+  const setupConfigured =
+    config.githubClientId && config.githubClientSecret && config.setupBaseUrl;
+  const setupDeps: SetupServerDeps | null = setupConfigured
+    ? {
+        oauth: new HttpGitHubOAuthClient({
+          clientId: config.githubClientId!,
+          clientSecret: config.githubClientSecret!,
+        }),
+        validateKey: anthropicKeyValidator,
+        vault,
+        config: {
+          clientId: config.githubClientId!,
+          clientSecret: config.githubClientSecret!,
+          baseUrl: config.setupBaseUrl!,
+        },
+        log,
+      }
+    : null;
+  if (!setupConfigured) {
+    log.warn(
+      {},
+      'Setup page disabled: set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, and SETUP_BASE_URL to enable BYO key entry',
+    );
+  }
+  const server = createServer(webhookMiddleware, createSetupMiddleware(setupDeps));
 
   server.listen(config.port, () => {
     console.log(`Tsukinome listening on port ${config.port}`);
@@ -78,6 +107,7 @@ async function main() {
     openSandbox: openCodeSandbox,
     log,
     runBudgetNanoUsd: config.runBudgetNanoUsd,
+    setupBaseUrl: config.setupBaseUrl,
   });
 
   const shutdown = (signal: string) => {

@@ -6,7 +6,17 @@ type Middleware = (
   next: (err?: Error) => void,
 ) => void;
 
-export function createServer(middleware?: Middleware): http.Server {
+/**
+ * Compose the HTTP server. Order: `/health`, then the setup-page middleware (Phase 12b —
+ * calls next() for non-`/setup` paths), then the Probot webhook middleware, then 404.
+ * Both middlewares are optional so tests and earlier phases work unchanged.
+ */
+export function createServer(webhookMiddleware?: Middleware, setupMiddleware?: Middleware): http.Server {
+  const notFound = (res: http.ServerResponse): void => {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not found' }));
+  };
+
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -14,16 +24,19 @@ export function createServer(middleware?: Middleware): http.Server {
       return;
     }
 
-    if (middleware) {
-      middleware(req, res, () => {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'not found' }));
-      });
-      return;
-    }
+    const runWebhook = (): void => {
+      if (webhookMiddleware) {
+        webhookMiddleware(req, res, () => notFound(res));
+      } else {
+        notFound(res);
+      }
+    };
 
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'not found' }));
+    if (setupMiddleware) {
+      setupMiddleware(req, res, runWebhook);
+    } else {
+      runWebhook();
+    }
   });
 
   return server;

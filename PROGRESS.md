@@ -16,9 +16,9 @@ Keep this current. It's the source of truth for what's done and what's next.
 - [x] Phase 9 — Reviewer & Integrator → Pull Request  ← MVP heartbeat ✅
 - [x] Phase 10 — PR comment → fix loop (bounded)
 - [x] Phase 11 — Reliability, security, easy install  ← MVP done ✅
-- [~] Phase 12 — Bring-your-own Anthropic key
+- [x] Phase 12 — Bring-your-own Anthropic key
   - [x] Phase 12a — storage + per-run resolution + gating (no web UI)
-  - [ ] Phase 12b — OAuth setup page (the new web surface)
+  - [x] Phase 12b — OAuth setup page (the new web surface)  ← live OAuth run still to verify
 - [x] Phase 13a — `Toolchain` abstraction (behaviour-neutral refactor)
 - [x] Phase 13b — first non-TS language pack (Python)  ← live Python run still to verify
 
@@ -426,10 +426,44 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
     bytea round-trip test runs in CI with `DATABASE_URL`; no live BYO run this session. Verify a real
     two-installation concurrent run bills to distinct keys once 12b's setup page exists.
 
+- 2026-07-22 (Phase 12b): **BYO Anthropic key — the OAuth setup page (first user-facing web surface).**
+  Completes Phase 12: a verified installation manager pastes their own key; unauthorized users are
+  rejected; uninstall purges. Served on the existing server, no new process.
+  - **Ownership is proven by OAuth, re-checked at write time.** `GET /setup` → one-time `state` bound to
+    the installation → GitHub authorize → `/setup/callback` exchanges the code and calls
+    `GET /user/installations`; the key form is shown **only** if the target installation is in that
+    list (else 403). `POST /setup/key` re-verifies against the **session** (the verified installation
+    ids), never a hidden field — so a tampered `installation_id` can't store a key for an installation
+    the visitor doesn't manage. The OAuth user token is used once and discarded; only the verified ids
+    live in the (in-memory, TTL) session.
+  - **Testable core = pure handlers.** `src/web/setup-handlers.ts` returns a typed `SetupResult`
+    (redirect/html); the http adapter (`setup-server.ts`) parses query/cookie/body and writes it. The
+    whole security decision tree is unit-tested with fakes; the real `HttpGitHubOAuthClient` (fetch) +
+    `anthropicKeyValidator` (`models.list()`) are thin external adapters verified live, not in CI —
+    same posture as `AnthropicProvider`/E2B.
+  - **Key validated before storing** (catch typos at the form, not mid-run); transient validation
+    errors propagate so a *good* key isn't wrongly rejected.
+  - **Config is optional-with-graceful-degradation** (founder decision 2026-07-21): `GITHUB_CLIENT_ID`
+    / `GITHUB_CLIENT_SECRET` / `SETUP_BASE_URL` unset → `/setup` shows a "not configured" page and the
+    rest of the app runs (so the `ALLOW_PLATFORM_KEY_FALLBACK` dogfooding deploy needs no new vars).
+    Chosen over hard-required to keep the current deploy working with zero new config.
+  - **Uninstall purge** wired via `installation.deleted` → `vault.purge` (deduped); the 12a missing-key
+    refusal comment now deep-links to `${SETUP_BASE_URL}/setup?installation_id=<id>`.
+  - **Server composition:** `createServer` now chains health → setup middleware → webhook middleware →
+    404 (both middlewares optional; earlier phases/tests unchanged). Added `URLSearchParams` to the
+    eslint globals.
+  - **`docs/setup.md` brought current for the whole BYO feature** — it had never been updated for 12a,
+    so it now documents `MASTER_ENCRYPTION_KEY` / `ALLOW_PLATFORM_KEY_FALLBACK` too, plus the App's
+    OAuth URLs + `installation` event and a BYO subsection.
+  - **Not verified live** — no real OAuth round-trip this session (needs a deployed host with OAuth
+    configured). Verify set-key → a real run bills the stored key, and two installations with different
+    keys run concurrently without cross-tenant leakage.
+
 ## Session log
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-07-22 | Phase 12b | ✅ Complete (code + CI; live OAuth run pending a deployed host) | 281 tests pass (24 gated-skipped), typecheck + lint clean. BYO Anthropic key — the OAuth setup page. `GET /setup` → GitHub OAuth → verify the visitor manages the installation (`/user/installations`) → paste + live-validate the key → encrypt/store via the 12a vault; re-visitable to rotate; `installation.deleted` → purge; missing-key refusal now deep-links to the page. Testable core is pure handlers (`src/web/setup-handlers.ts`); real OAuth/validator are gated external adapters. Setup-page config (`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`/`SETUP_BASE_URL`) is optional — unset → "not configured" page, app unaffected. Demo: `npx vitest run test/web test/github/oauth.test.ts test/app.test.ts` — unauthorized user → 403 + nothing stored, bad key → rejected + nothing stored, good key → stored + rotatable, uninstall → purged. Next: Phase 12 done; verify live OAuth + a concurrent two-key run on a deployed host.
 - 2026-07-21 | Phase 12a | ✅ Complete (code + CI; live BYO run pending 12b's setup page) | 258 tests pass (24 gated-skipped), typecheck + lint clean. Bring-your-own Anthropic key — the unit-testable core, no web UI. Built AES-256-GCM secret crypto + `CredentialVault`, `installation_credentials` (migration 009, bytea, on both stores), a per-run `ProviderResolver` (own key → operator fallback flag → `MissingInstallationKeyError`) resolved inside the gateway from `run.installationId` before any spend, and a central terminal refusal in the worker (guidance + fail run + no retry). Config: `MASTER_ENCRYPTION_KEY` now required, `ANTHROPIC_API_KEY` optional, `ALLOW_PLATFORM_KEY_FALLBACK` flag. E2B + the DB pool untouched; the ~25 existing gateway constructions are behaviour-identical (compat constructor). Demo: `npx vitest run test/secrets test/llm/provider-resolver.test.ts test/llm/gateway.test.ts test/worker/missing-key.test.ts` — encrypt/decrypt round-trip, per-installation key isolation, missing-key refuses with zero spend, fallback flag path, uninstall purges. Next: 12b — the OAuth setup page + `installation.deleted` webhook wiring.
 - 2026-07-20 | Phase 13b | ✅ Complete (code + CI; live Python run pending a Python sandbox image) | 228 tests pass (23 gated-skipped), typecheck + lint clean. Added the `PYTHON` language pack (pytest/pip, `.py`, pytest conventions) + `promptConventions`/`isTestFile`/`toolchainById` on the toolchain; resolve the pack at intake and persist `context.toolchainId`; thread it through implement/fix/architect/clarifier (sandbox commands, test-conventions probe, example-test discovery + injected conventions, repo-map manifest); widened the code index (sidecar + fake + repo-map dirs) and the example-import extractor to Python; made `agents/test-author.md` language-neutral. Gate now accepts Python (refusal test → Ruby; new test asserts Python persists `toolchainId: 'python'`). Demo: `npx vitest run test/toolchain test/pipeline/tdd.test.ts` — the Python pack drives `pytest`/`pip` and a Python-pack TDD run finds `tests/test_*.py` examples + injects pytest conventions; the TS/JS path is unchanged. Next: build a Python-capable E2B image and verify a real Python issue→PR end to end.
 - 2026-07-20 | Phase 13a | ✅ Complete | 220 tests pass (23 gated-skipped), typecheck + lint clean. Introduced the `Toolchain` abstraction (`src/toolchain/toolchain.ts`) + `typescript-javascript` pack + `toolchainForLanguage`/`detectToolchain` resolvers, routed both sandbox sites + the test-conventions probe through it, and turned the language gate into a capability check — **zero behaviour change** (the existing suite is the neutrality guard). Split Phase 13 into 13a (this) + 13b (Python pack). Demo: `npx vitest run test/toolchain` — the pack encodes the old `npm ci`/`npm test`/vitest-config/`.ts` values; a stand-in Python pack drives `pytest`/`pip` through the sandbox with no `npm`. Next: 13b — the Python language pack.
