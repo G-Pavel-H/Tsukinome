@@ -1,12 +1,16 @@
-# Tsukinome code-index sidecar (Phase 6). Install into a venv, then point the app at that
-# interpreter via COCOINDEX_PYTHON (see docs/setup.md):
+# Tsukinome code-index sidecar (Phase 6, embedding backend swapped in Phase 14). Install into
+# a venv, then point the app at that interpreter via COCOINDEX_PYTHON (see docs/setup.md):
 #   python3 -m venv .venv && .venv/bin/pip install -r sidecar/requirements.txt
 #
 # cocoindex is pinned to the 1.0 API line — 1.0 was a full rewrite (the old flow_def/sources/
 # targets API is gone), and the sidecar uses 1.0's cocoindex.ops.text.RecursiveSplitter /
 # cocoindex.ops.code.CodeSource for tree-sitter chunking. A future 2.0 could break again.
 cocoindex>=1.0,<2
-sentence-transformers
+# fastembed (Phase 14) — embeds the SAME MiniLM model as before (all-MiniLM-L6-v2, 384-dim)
+# but on ONNX Runtime instead of PyTorch. torch was a ~2GB install wanting ~1.5GB RAM and OOM'd
+# small hosts; fastembed is ~177MB of deps + a ~90MB model and peaks ~300MB with threads=1 and a
+# small batch size. Same vectors, no dimension change, no migration.
+fastembed>=0.4,<1
 # psycopg (v3) — the sidecar writes chunk rows into code_chunks itself (cocoindex 1.0 no longer
 # manages the target table, and this keeps code_chunks owned by migration 006).
 psycopg[binary]>=3,<4

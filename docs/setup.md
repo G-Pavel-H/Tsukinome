@@ -128,6 +128,18 @@ model (`all-MiniLM-L6-v2`, no API key, ~$0), and writes rows into `code_chunks`.
 teardown are owned in TypeScript. This is **optional** — with it unavailable the pipeline still
 runs and simply plans from the spec without repo retrieval.
 
+Embeddings run on **ONNX Runtime via [`fastembed`](https://github.com/qdrant/fastembed)** — the
+same MiniLM model as before, but no PyTorch. This is what keeps the sidecar hostable on a small
+box (Phase 14): torch was a ~2GB install wanting ~1.5GB RAM; fastembed is ~177MB of deps + a
+~90MB model and, with `threads=1` + a small batch (both pinned in `sidecar/cocoindex_flow.py`),
+peaks around **~300MB** during indexing. Because the sidecar is a separate, short-lived process
+(spawned per run, then exits), that is a brief spike, not a permanent cost on the Node app.
+
+**Sizing:** fits a **2GB host** comfortably (e.g. a 2GB VPS alongside other small apps). The
+**512MB Render Starter is tight** — the ~300MB indexing spike plus the Node app is close to the
+ceiling; if it breaches, retrieval degrades gracefully (the run continues with no code context,
+it does not crash). No dimension change: `code_chunks.embedding` stays `vector(384)`.
+
 Install the deps into a venv and point the app at that interpreter:
 
 ```bash
@@ -137,7 +149,8 @@ python3 -m venv .venv
 
 Then set `COCOINDEX_PYTHON=/absolute/path/to/.venv/bin/python`. The sidecar needs `DATABASE_URL`
 to reach the same pgvector Postgres (the app passes it through automatically). The first run
-downloads the embedding model and installs torch, so it is slow; subsequent runs are fast.
+downloads the ~90MB ONNX model (cached under the fastembed cache dir), so it is slower; subsequent
+runs reuse the cache. No torch, no GPU.
 
 > CocoIndex is pinned to the `1.0.x` API line (`sidecar/requirements.txt`); 1.0 was a full rewrite
 > of the pre-1.0 flow API. To verify the sidecar end to end, run the gated integration test:

@@ -499,7 +499,43 @@ Add the Python pack (pip/pytest, its test conventions + source extensions + sand
 
 **Open questions (to review with Claude Code CLI):** ~~which language to do first~~ **Python** (decided 2026-07-20); per-language sandbox templates vs one multi-toolchain image (leaning one multi-toolchain image for the MVP); how much the test-first loop's grain needs to change per ecosystem (test conventions differ a lot); interaction with the TDD-gate policy work (some ecosystems/issues may fit "direct" better than strict red→green).
 
-### Phase 14 — Declared toolchain (optional `.tsukinome/config.yml`) — cheap path to more languages
+### Phase 14 — Lightweight local embeddings (drop torch; ONNX via fastembed)
+
+**The problem we're solving — it blocks launch.** The code index currently embeds **locally**: the CocoIndex sidecar loads a SentenceTransformer (MiniLM) via **PyTorch** on the host. torch is a ~2GB install that also wants ~1–1.5GB of RAM at inference, and the **Render starter plan (512MB) can't run it** — the deploy OOMs or forces a much pricier tier. That contradicts the "lightweight, flat-cost hosting" thesis: every other heavy workload is already off-host (tests → E2B, inference → Anthropic), and local embedding is the one place we dragged GPU-class weight onto the host.
+
+**The decision (2026-07-26): keep embeddings local, but swap the runtime — PyTorch → ONNX Runtime via [`fastembed`](https://github.com/qdrant/fastembed).** We keep the **exact same model** (`sentence-transformers/all-MiniLM-L6-v2`, 384-dim), so retrieval quality is **unchanged** and there is **no dimension change and no migration**. CocoIndex/tree-sitter still does the chunking. Only the embedding *backend* inside the sidecar changes.
+
+**Why local ONNX over an embedding API (Gemini was the earlier candidate — rejected 2026-07-26):** an API would shrink the host further but adds an external dependency, an operator key, rate-limit/quota handling, and asymmetric doc/query task-types — real onboarding + ops surface for a component that is deliberately *best-effort*. Staying local keeps Tsukinome self-contained (no new key, no network dependency, works offline, one Python sidecar we already ship for CocoIndex) and needs almost no code change. The only thing wrong with the current setup is torch's weight — so we remove *only that*.
+
+**Measured footprint (fastembed + MiniLM, this repo, `threads=1`):**
+- **Install:** ~177MB of Python deps (onnxruntime ~74MB + numpy + tokenizers) + a ~90MB model file, vs torch's ~2GB. (onnxruntime CPU wheel ≈ 16MB vs the PyTorch wheel ≈ 185MB–1GB+.)
+- **RAM:** ~290MB with the model loaded; peak during indexing depends almost entirely on **batch size** — `batch_size=1` → **~298MB** peak, `batch_size=16` → ~388MB. The ~290MB model-load floor dominates; the batch adds the rest.
+- **The two load-bearing knobs, found by measuring:** onnxruntime spawns one memory arena **per CPU core** by default (1.5GB on a 10-core box) — pin `threads=1`; and a **small `batch_size`** keeps the peak near the ~290MB floor. Both are baked into the sidecar.
+- **The sidecar is a separate, short-lived process** (spawned per index/query, then exits) — so this is a brief spike during indexing, not a permanent resident cost on the long-running Node app.
+
+**What changes (small, sidecar-local):**
+- **`sidecar/requirements.txt`:** drop `sentence-transformers`; add `fastembed`. Keep `cocoindex` (still the chunker) and `psycopg` (the sidecar still writes `code_chunks` rows).
+- **`sidecar/cocoindex_flow.py`:** replace the `SentenceTransformer` load + `.encode()` with `fastembed.TextEmbedding(model_name=…, threads=1)` + `.embed(…, batch_size=<small>)`, in **both** the `index` and `query-embed` modes. Same model id, same 384-dim output — document and query embeddings stay in one shared space.
+- **No migration, no dimension change.** `code_chunks.embedding` stays `vector(384)`; `EMBEDDING_DIM` / `EMBEDDING_MODEL` are unchanged. The per-run ephemeral index re-embeds every run regardless.
+- **TS side essentially untouched.** `SidecarEmbeddingProvider` / `CocoIndexSidecarRunner` keep the same CLI contract and model id. We **keep** the `COCOINDEX_PYTHON` venv knob — the sidecar (CocoIndex + fastembed) is still Python, just far lighter. (This is the deliberate reversal of the earlier Gemini plan's "retire the venv" goal; that goal only made sense if embeddings left the host.)
+- **Docs:** `docs/setup.md` sidecar section rewritten for fastembed/ONNX (torch gone, the measured footprint, first-run model download + cache dir, "fits a 2GB box; 512MB Starter is tight-but-plausible with graceful degradation").
+
+**Exit criteria:**
+- A run indexes and retrieves code with **no torch / no PyTorch dependency** anywhere on the host.
+- The sidecar's embedding footprint is bounded (`threads`/`batch_size` pinned) and measured to fit a 2GB host with headroom; the Starter (512MB) case is documented with its residual risk.
+- Retrieval quality is **unchanged** (same model, same 384-dim vectors) — the gated CocoIndex integration test still ranks relevant chunks first.
+- A sidecar/embedding failure still **degrades gracefully** (no chunks, run continues) — the existing best-effort posture is preserved.
+- `docs/setup.md` is updated; `PROGRESS.md` records the decision and the measured numbers.
+
+**Delivered — see `PROGRESS.md` for the dated entry.**
+
+---
+
+## 8. Post-launch backlog (v2)
+
+> Deliberately **after** the public launch. Not required to ship. These are version-2 upgrades — revisit once the product is live and has real usage.
+
+### Phase 2.1 — Declared toolchain (optional `.tsukinome/config.yml`) — cheap path to more languages
 
 **The problem we're solving:** After Phase 13, adding each new language (Java/Maven-or-Gradle, C#/dotnet, Go, Rust…) means building and maintaining a full **auto-detecting** language pack — heuristics for that ecosystem's manifests, install/test commands, test conventions, and edge cases. That's real per-language overhead, and detection is exactly where the ambiguity lives (Maven vs Gradle, monorepos, non-standard test scripts). We want a way to support more languages **without** writing bespoke detection for each — and to let any repo remove the guessing entirely when it wants to.
 
