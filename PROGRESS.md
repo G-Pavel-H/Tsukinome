@@ -21,6 +21,7 @@ Keep this current. It's the source of truth for what's done and what's next.
   - [x] Phase 12b — OAuth setup page (the new web surface)  ← live OAuth run still to verify
 - [x] Phase 13a — `Toolchain` abstraction (behaviour-neutral refactor)
 - [x] Phase 13b — first non-TS language pack (Python)  ← live Python run still to verify
+- [x] Phase 14 — Lightweight local embeddings (ONNX via fastembed; torch dropped)  ← gated index run still to verify on a host
 
 ## Outstanding issues (revisit before calling go-live done)
 
@@ -467,10 +468,53 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
     configured). Verify set-key → a real run bills the stored key, and two installations with different
     keys run concurrently without cross-tenant leakage.
 
+- 2026-07-26 (Phase 14): **Dropped PyTorch from the host — the code-index sidecar now embeds on
+  ONNX Runtime via `fastembed`, keeping the *same* MiniLM model.** This is the last thing blocking a
+  cheap-host launch: torch is a ~2GB install wanting ~1.5GB RAM and OOM'd Render's 512MB Starter.
+  - **Rejected the earlier Gemini-API plan** (the plan doc's old Phase 14, now fully rewritten).
+    An embedding API would shrink the host further but adds an external dependency, an operator key,
+    rate-limit/quota handling, and doc/query task-type asymmetry — real onboarding + ops surface for a
+    deliberately *best-effort* component. Founder wants Tsukinome self-contained and cheap to host, so
+    we kept embeddings local and changed **only the runtime**.
+  - **Same model, no migration.** `sentence-transformers/all-MiniLM-L6-v2`, 384-dim, unchanged →
+    `code_chunks.embedding` stays `vector(384)`; `EMBEDDING_DIM`/`EMBEDDING_MODEL` untouched. Retrieval
+    quality is identical by construction. Because the index is per-run ephemeral there was no backfill
+    to consider regardless.
+  - **Measured (this repo, `threads=1`):** ~177MB deps + ~90MB model (vs torch ~2GB); ~290MB RAM with
+    the model loaded; **peak tracks batch size** — `batch_size=1`→~298MB, `16`→~388MB. Two knobs are
+    load-bearing and were found *only* by measuring: onnxruntime spawns one memory arena **per CPU
+    core** (1.5GB on a 10-core box) unless pinned to `threads=1`; and a small batch keeps the peak near
+    the model-load floor. Both are constants in `sidecar/cocoindex_flow.py` (`EMBED_THREADS=1`,
+    `EMBED_BATCH_SIZE=4`). The sidecar is a short-lived per-run process, so this is a spike, not a
+    resident cost.
+  - **Change was sidecar-local:** `requirements.txt` (drop `sentence-transformers`, add `fastembed`;
+    keep `cocoindex` + `psycopg`) and `cocoindex_flow.py` (`SentenceTransformer.encode` →
+    `TextEmbedding(...).embed(...)` in both `index` and `query-embed`). **Zero TS changes** — the
+    `SidecarEmbeddingProvider`/`CocoIndexSidecarRunner` CLI contract and model id are unchanged, so the
+    existing FakeEmbeddingProvider + pgvector unit tests are the neutrality guard.
+  - **We keep the `COCOINDEX_PYTHON` venv knob** — deliberate reversal of the old plan's "retire the
+    venv" goal (that only made sense if embeddings left the host). The sidecar is still Python
+    (CocoIndex + fastembed), just far lighter.
+  - **TDD:** wrote `test/index/sidecar-backend.test.ts` red-first — a CI guard that the sidecar imports
+    `fastembed`/`TextEmbedding` and not the torch stack, and pins `threads=1` + a batch size + the
+    384-dim model. (The guard checks code tokens, not comments, so the header explaining the swap
+    doesn't trip it.) Also ran the **real** modified sidecar `query-embed` on a live fastembed install
+    → a 384-dim, unit-normalized vector, proving the swap works, not just that the files changed. Full
+    suite **286 pass / 24 skipped**, typecheck + lint clean.
+  - **Sizing / hosting:** fits a 2GB box comfortably (2GB VPS alongside the founder's two other small
+    apps). The 512MB Starter is **tight but plausible** — the ~300MB indexing spike + Node is near the
+    ceiling; if it breaches, retrieval degrades gracefully (run continues, no code context), it does
+    not crash. `docs/setup.md` updated with the footprint + sizing.
+  - **Not verified live** (gated, like E2B/Anthropic): a full `index` run (CocoIndex chunking + psycopg
+    INSERT into pgvector) needs a venv with `cocoindex` + `DATABASE_URL` — run
+    `COCOINDEX_TEST=1 COCOINDEX_PYTHON=… npx vitest run test/index/cocoindex.integration.test.ts` on a
+    host, plus a real deploy to confirm the memory envelope on the target plan.
+
 ## Session log
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-07-26 | Phase 14 | ✅ Complete (code + CI; gated index run + live memory envelope pending a host) | 286 tests pass (24 gated-skipped), typecheck + lint clean. Dropped PyTorch: the code-index sidecar now embeds the **same** MiniLM model (`all-MiniLM-L6-v2`, 384-dim) on ONNX Runtime via `fastembed` instead of `sentence-transformers`. torch (~2GB, ~1.5GB RAM) OOM'd small hosts; fastembed is ~177MB deps + ~90MB model and peaks ~300MB with `threads=1` + a small batch (both pinned in `sidecar/cocoindex_flow.py`). No dimension change, no migration, zero TS changes — the old Gemini-API plan was rejected (external dep/key/quotas for a best-effort component) and the plan doc's Phase 14 fully rewritten. Demo: `npx vitest run test/index/sidecar-backend.test.ts` (guards the fastembed swap + memory knobs); real `query-embed` on a live fastembed venv returns a 384-dim normalized vector. Next: run the gated `cocoindex.integration.test.ts` on a venv with `cocoindex`+`DATABASE_URL` and confirm the memory envelope on the deployed plan.
 - 2026-07-22 | Phase 12b | ✅ Complete (code + CI; live OAuth run pending a deployed host) | 281 tests pass (24 gated-skipped), typecheck + lint clean. BYO Anthropic key — the OAuth setup page. `GET /setup` → GitHub OAuth → verify the visitor manages the installation (`/user/installations`) → paste + live-validate the key → encrypt/store via the 12a vault; re-visitable to rotate; `installation.deleted` → purge; missing-key refusal now deep-links to the page. Testable core is pure handlers (`src/web/setup-handlers.ts`); real OAuth/validator are gated external adapters. Setup-page config (`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`/`SETUP_BASE_URL`) is optional — unset → "not configured" page, app unaffected. Demo: `npx vitest run test/web test/github/oauth.test.ts test/app.test.ts` — unauthorized user → 403 + nothing stored, bad key → rejected + nothing stored, good key → stored + rotatable, uninstall → purged. Next: Phase 12 done; verify live OAuth + a concurrent two-key run on a deployed host.
 - 2026-07-21 | Phase 12a | ✅ Complete (code + CI; live BYO run pending 12b's setup page) | 258 tests pass (24 gated-skipped), typecheck + lint clean. Bring-your-own Anthropic key — the unit-testable core, no web UI. Built AES-256-GCM secret crypto + `CredentialVault`, `installation_credentials` (migration 009, bytea, on both stores), a per-run `ProviderResolver` (own key → operator fallback flag → `MissingInstallationKeyError`) resolved inside the gateway from `run.installationId` before any spend, and a central terminal refusal in the worker (guidance + fail run + no retry). Config: `MASTER_ENCRYPTION_KEY` now required, `ANTHROPIC_API_KEY` optional, `ALLOW_PLATFORM_KEY_FALLBACK` flag. E2B + the DB pool untouched; the ~25 existing gateway constructions are behaviour-identical (compat constructor). Demo: `npx vitest run test/secrets test/llm/provider-resolver.test.ts test/llm/gateway.test.ts test/worker/missing-key.test.ts` — encrypt/decrypt round-trip, per-installation key isolation, missing-key refuses with zero spend, fallback flag path, uninstall purges. Next: 12b — the OAuth setup page + `installation.deleted` webhook wiring.
 - 2026-07-20 | Phase 13b | ✅ Complete (code + CI; live Python run pending a Python sandbox image) | 228 tests pass (23 gated-skipped), typecheck + lint clean. Added the `PYTHON` language pack (pytest/pip, `.py`, pytest conventions) + `promptConventions`/`isTestFile`/`toolchainById` on the toolchain; resolve the pack at intake and persist `context.toolchainId`; thread it through implement/fix/architect/clarifier (sandbox commands, test-conventions probe, example-test discovery + injected conventions, repo-map manifest); widened the code index (sidecar + fake + repo-map dirs) and the example-import extractor to Python; made `agents/test-author.md` language-neutral. Gate now accepts Python (refusal test → Ruby; new test asserts Python persists `toolchainId: 'python'`). Demo: `npx vitest run test/toolchain test/pipeline/tdd.test.ts` — the Python pack drives `pytest`/`pip` and a Python-pack TDD run finds `tests/test_*.py` examples + injects pytest conventions; the TS/JS path is unchanged. Next: build a Python-capable E2B image and verify a real Python issue→PR end to end.
