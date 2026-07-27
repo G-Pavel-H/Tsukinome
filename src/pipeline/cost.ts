@@ -1,4 +1,5 @@
 import { formatUsd } from '../llm/pricing.js';
+import { formatDuration } from '../format-duration.js';
 import type { LlmCall } from '../store/types.js';
 
 /** One role's rolled-up usage across a run. */
@@ -30,11 +31,12 @@ function rollUpByRole(calls: LlmCall[]): RoleTotal[] {
  * per-role breakdown. Surfaces in the PR body and an issue comment so the run's
  * measured cost is visible in GitHub with no external dashboard.
  */
-export function renderCostSummary(calls: LlmCall[]): string {
+export function renderCostSummary(calls: LlmCall[], durationMs?: number): string {
   const totalNanoUsd = calls.reduce((sum, c) => sum + c.costNanoUsd, 0);
+  const durationPart = durationMs !== undefined ? ` in ${formatDuration(durationMs)}` : '';
   const headline = `**💰 Run cost:** ${formatUsd(totalNanoUsd)} across ${calls.length} model call${
     calls.length === 1 ? '' : 's'
-  }.`;
+  }${durationPart}.`;
   if (calls.length === 0) return headline;
 
   const rows = rollUpByRole(calls)
