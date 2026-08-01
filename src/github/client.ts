@@ -107,6 +107,12 @@ export interface GitHubClient {
   getIssue(input: IssueInput): Promise<IssueContent>;
   /** GitHub's detected primary language for the repo, or null if none. */
   getRepoLanguage(input: RepoLanguageInput): Promise<string | null>;
+  /**
+   * Names of the files at the repo root. Used to resolve the language pack from the project's
+   * actual manifests, which is more reliable than the byte-count primary language on polyglot
+   * repos. Cheap: one contents API call, no clone.
+   */
+  getRepoRootFiles(input: RepoLanguageInput): Promise<string[]>;
   /** Deterministic git write: ensure the branch and create/update one file. */
   commitFile(input: CommitFileInput): Promise<CommitFileResult>;
   /** Deterministic git write: ensure the branch and commit multiple files in one commit. */
@@ -161,6 +167,16 @@ export function createProbotGitHubClient(probot: Probot): GitHubClient {
       const octokit = await probot.auth(input.installationId);
       const { data } = await octokit.rest.repos.get({ owner: input.owner, repo: input.repo });
       return data.language ?? null;
+    },
+
+    async getRepoRootFiles(input: RepoLanguageInput): Promise<string[]> {
+      const octokit = await probot.auth(input.installationId);
+      const { data } = await octokit.rest.repos.getContent({
+        owner: input.owner,
+        repo: input.repo,
+        path: '',
+      });
+      return Array.isArray(data) ? data.map((entry) => entry.name) : [];
     },
 
     async commitFile(input: CommitFileInput): Promise<CommitFileResult> {

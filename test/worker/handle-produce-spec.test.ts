@@ -155,3 +155,84 @@ describe('handleProduceSpec', () => {
     expect(github.postIssueComment).toHaveBeenCalled();
   });
 });
+
+describe('handleProduceSpec — toolchain resolution', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  it('prefers the repo\'s actual manifests over GitHub\'s primary language', async () => {
+    // The incident: a polyglot repo whose Angular frontend is the target, but whose byte-count
+    // primary language is Python (a few build scripts + a backend). The run picked pytest and
+    // died on `python: command not found`. Manifests are the more reliable signal.
+    const github = fakeGitHub({ language: 'Python', rootFiles: ['package.json', 'angular.json'] });
+
+    await handleProduceSpec(job, {
+      store,
+      github,
+      gateway: new LlmGateway(specProvider(), store, silentLog),
+      log: silentLog,
+    });
+
+    const run = await store.getRun(job.payload);
+    expect(run!.context.toolchainId).toBe('typescript-javascript');
+    expect(run!.state).toBe(RunState.Specifying);
+  });
+
+  it('falls back to the primary language when no manifest is recognisable', async () => {
+    const github = fakeGitHub({ language: 'Python', rootFiles: ['README.md'] });
+
+    await handleProduceSpec(job, {
+      store,
+      github,
+      gateway: new LlmGateway(specProvider(), store, silentLog),
+      log: silentLog,
+    });
+
+    expect((await store.getRun(job.payload))!.context.toolchainId).toBe('python');
+  });
+
+  it('accepts a repo whose manifest is supported even if its language is not', async () => {
+    // Strictly more permissive than before: we only refuse when BOTH signals come up empty.
+    const github = fakeGitHub({ language: 'Ruby', rootFiles: ['package.json'] });
+
+    await handleProduceSpec(job, {
+      store,
+      github,
+      gateway: new LlmGateway(specProvider(), store, silentLog),
+      log: silentLog,
+    });
+
+    const run = await store.getRun(job.payload);
+    expect(run!.state).toBe(RunState.Specifying);
+    expect(run!.context.toolchainId).toBe('typescript-javascript');
+  });
+
+  it('still refuses when neither the manifests nor the language are supported', async () => {
+    const github = fakeGitHub({ language: 'Ruby', rootFiles: ['Gemfile'] });
+
+    await handleProduceSpec(job, {
+      store,
+      github,
+      gateway: new LlmGateway(specProvider(), store, silentLog),
+      log: silentLog,
+    });
+
+    expect((await store.getRun(job.payload))!.state).toBe(RunState.Unsupported);
+  });
+
+  it('degrades to the language when the root listing is unavailable', async () => {
+    const github = fakeGitHub({ language: 'TypeScript' });
+    github.getRepoRootFiles.mockRejectedValueOnce(new Error('403'));
+
+    await handleProduceSpec(job, {
+      store,
+      github,
+      gateway: new LlmGateway(specProvider(), store, silentLog),
+      log: silentLog,
+    });
+
+    expect((await store.getRun(job.payload))!.context.toolchainId).toBe('typescript-javascript');
+  });
+});

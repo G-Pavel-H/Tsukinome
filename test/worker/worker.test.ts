@@ -5,6 +5,8 @@ import { FakeSandboxProvider } from '../sandbox/fake-sandbox.js';
 import { FakeLlmProvider } from '../llm/fake-provider.js';
 import { LlmGateway } from '../../src/llm/gateway.js';
 import { fakeCodeIndex, fakeCloneRepo, fakeOpenSandbox, fakeGitHub, silentLog } from '../helpers.js';
+import { RunState } from '../../src/store/types.js';
+import { SandboxSetupError } from '../../src/sandbox/code-sandbox.js';
 
 const sandboxProvider = new FakeSandboxProvider();
 const codeIndex = fakeCodeIndex();
@@ -74,6 +76,51 @@ describe('processNextJob', () => {
     // The dead-letter comment was attempted with the run's issue coordinates.
     expect(github.postIssueComment).toHaveBeenCalledWith(
       expect.objectContaining({ issueNumber: 42, body: expect.stringContaining('unexpected error') }),
+    );
+  });
+
+  it('marks the run Failed when a job dead-letters, so it is never left stranded', async () => {
+    // A dead-lettered job used to leave its run in a transient state (e.g. `implementing`),
+    // which is not in STALE_STATES — so the sweeper never touched it and the run sat forever.
+    let now = 1_000_000;
+    const clockStore = new InMemoryStore({ now: () => now });
+    const clockGateway = new LlmGateway(new FakeLlmProvider(), clockStore, silentLog);
+    const github = fakeGitHub({ fail: true });
+    const deps = { store: clockStore, github, sandboxProvider, gateway: clockGateway, codeIndex, cloneRepo, openSandbox, log: silentLog };
+    await clockStore.enqueueJob({ type: 'issue_opened', payload });
+
+    for (let i = 0; i < 3; i++) {
+      await processNextJob(deps);
+      now += 60 * 60 * 1000;
+    }
+
+    // `received` is not in STALE_STATES either — every non-terminal state had this problem.
+    expect((await clockStore.getRun(payload))!.state).toBe(RunState.Failed);
+  });
+
+  it('refuses a sandbox setup failure immediately instead of burning retries', async () => {
+    // `python: command not found` cannot become true on attempt 2 or 3. Deterministic
+    // environment failures are terminal, like a missing installation key.
+    const github = fakeGitHub();
+    const failingOpen = async () => {
+      throw new SandboxSetupError('npm ci', 'bash: npm: command not found');
+    };
+    const deps = { store, github, sandboxProvider, gateway, codeIndex, cloneRepo, openSandbox: failingOpen, log: silentLog };
+    const { run } = await store.findOrCreateRun(payload, RunState.Received);
+    await store.updateRunState(run.id, RunState.Implementing);
+    await store.updateRunContext(run.id, {
+      planData: { summary: 's', approach: 'a', affectedFiles: [], contracts: [], dataChanges: [], testStrategy: [] },
+    });
+    await store.recordArtifact({ runId: run.id, kind: 'spec', path: 'spec.md', content: '# spec' });
+    await store.recordArtifact({ runId: run.id, kind: 'plan', path: 'plan.md', content: '# plan' });
+    const job = await store.enqueueJob({ type: 'implement', payload });
+
+    await processNextJob(deps);
+
+    expect(store.getJob(job.id)!.status).toBe('done'); // not re-queued
+    expect((await store.getRunById(run.id))!.state).toBe(RunState.Failed);
+    expect(github.postIssueComment).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining('environment') }),
     );
   });
 });
