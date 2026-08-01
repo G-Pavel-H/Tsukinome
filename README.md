@@ -184,6 +184,9 @@ This repo is built by **Claude Code**, phase by phase, following `docs/implement
 - `PROGRESS.md` — current status, decisions, and log.
 - `.claude/commands/` — `/phase-report` helper.
 
+Branching: each phase branches off **`develop`** and PRs back into it. **`main`** is the deployed
+branch and only moves via a `develop` → `main` release PR. CI runs on both.
+
 ```bash
 npm test          # unit tests (gated integration suites skip without their keys/DB)
 npm run lint

@@ -173,6 +173,17 @@ npm run dev:smee          # needs SMEE_URL set to your smee.io channel
 npm run dev               # tsx watch, same single-process server+worker
 ```
 
+The proxy relays to **`http://localhost:3000/api/github/webhooks`** (`PORT` defaults to `3000`);
+set `SETUP_BASE_URL=http://localhost:3000` to click through the setup page locally.
+
+> **Running a dev instance alongside a hosted one.** A GitHub App has exactly one webhook URL, so
+> local development needs its **own second App** pointed at your smee channel — otherwise pointing
+> the App at your host makes local dev go deaf. Give that dev App its **own database** too: two
+> workers on one `DATABASE_URL` both poll the same `jobs` table and will claim each other's jobs.
+> With separate Apps and separate databases the two run independently. `MASTER_ENCRYPTION_KEY` is
+> bound to its database — stored keys encrypted under one cannot be decrypted with the other, so
+> keep each environment's key with its own DB rather than copying `.env` values across.
+
 ## 5. Use it
 
 1. On a repo where the App is installed, **open an issue** describing the change.

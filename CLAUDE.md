@@ -10,7 +10,7 @@ The full build plan is in **`docs/implementation-plan.md`**. Read it before doin
 2. **Plan mode first.** At the start of a phase, propose the approach for *that phase only* and wait for my approval before editing.
 3. **Stop and report at every phase boundary.** When a phase's exit criteria are met: update `PROGRESS.md`, summarise what you did + the demo + what's next, then **stop and wait for my go-ahead**. Do not roll into the next phase.
 4. **Dogfood TDD.** Write the failing test before the implementation, every time. Tsukinome enforces test-first on its users; we build it test-first too.
-5. **Each phase ends green and deployable.** One branch + one PR per phase. Never leave `main` broken.
+5. **Each phase ends green and deployable.** One branch + one PR per phase, off `develop` and back into `develop`. Never leave `develop` or `main` broken.
 6. **Instrument cost from day one.** Once the LLM gateway exists (Phase 3), every model call logs tokens + dollar cost against the run. Never add an uninstrumented call.
 7. **Keep `PROGRESS.md` current** — phase status, decisions, and any deviations from the plan. If the plan turns out wrong, update the plan rather than silently diverging.
 
@@ -24,6 +24,28 @@ The full build plan is in **`docs/implementation-plan.md`**. Read it before doin
 - **LLM:** Anthropic API — Haiku 4.5 / Sonnet 4.6 / Opus 4.8, with prompt caching. Tier by phase (Haiku triage, Sonnet implementation/tests, Opus spec/plan/review).
 - **Agents:** hand-rolled. No agent framework. An agent = an instruction file + model tier + tool allowlist + I/O schema, invoked through the LLM gateway. No LangGraph etc.
 - **Target repos (MVP):** TypeScript repos only; detect and refuse others gracefully.
+
+## Environments & branching
+
+Two GitHub Apps, two environments, one repo.
+
+| | Production | Development |
+| --- | --- | --- |
+| GitHub App | the public App | the original App |
+| Runs on | Render | laptop — `npm run dev`, **port 3000** |
+| Webhooks | App URL → Render `/api/github/webhooks` | App URL → smee channel → `npm run dev:smee` → `localhost:3000` |
+| Branch | `main` | `develop` |
+| Database | production Neon DB | separate dev Neon DB |
+
+- **`develop` is the integration branch.** Every phase branches off it and PRs back into it.
+- **`main` is what's deployed.** It changes *only* via a `develop` → `main` release PR — never a
+  direct commit, never a phase PR.
+- Both branches must stay green; CI runs on both.
+- The two environments share **no** state. `APP_ID`, `PRIVATE_KEY`, `WEBHOOK_SECRET`,
+  `DATABASE_URL`, `SETUP_BASE_URL` and `MASTER_ENCRYPTION_KEY` all differ. `MASTER_ENCRYPTION_KEY`
+  is bound to its database — a key from one environment cannot decrypt the other's stored Anthropic
+  keys, so never copy `.env` values or credential rows between them.
+- Local `SETUP_BASE_URL=http://localhost:3000`.
 
 ## Two layers of "agent" — do not confuse them
 
