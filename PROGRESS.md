@@ -110,8 +110,18 @@ repo would have failed loudly at install; with a multi-toolchain image it would 
 quietly committed `pytest.ini` + `conftest.py` into an Angular repo. Manifest-first detection
 removes the trigger; the gap in the gate itself remains.
 
-**Still outstanding from this incident:** the multi-toolchain E2B image (Node + Python) from Phase
-13b is still unbuilt, so genuine Python repos cannot run at all yet.
+**Root cause behind the root cause: Phase 13b was marked ✅ Complete while its own exit criterion
+("a real Python repo goes issue → green, test-first PR") had never once been met.** The code was
+genuinely finished and CI-covered; the missing piece lived outside the repo — an E2B template with
+Python in it. The project's "complete = code + CI green, live verification gated" convention is
+fine for a detail we haven't observed (prompt-cache hits, say), but here it hid a headline
+capability that simply did not function. **`e2b.Dockerfile` now installs Python 3 + pip**
+(incl. `python-is-python3` — the pack invokes `python`, and Debian ships only `python3`), so the
+image is genuinely multi-toolchain. It still has to be **rebuilt and registered by hand**
+(`e2b template build`) before any Python repo works.
+
+**Apply the same skepticism to the other code-complete-but-unproven phases:** 12b (BYO-key OAuth,
+never run live) and 15 (test-setup bootstrap, never run live).
 
 ## Locked decisions
 
