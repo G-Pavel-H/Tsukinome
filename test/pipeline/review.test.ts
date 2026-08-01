@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderPrBody, renderPrTitle, renderReviewedComment } from '../../src/pipeline/review.js';
+import { renderTestSetupNote } from '../../src/pipeline/test-setup.js';
 import type { Plan, Review, Spec } from '../../src/pipeline/schemas.js';
 
 const spec: Spec = {
@@ -65,5 +66,26 @@ describe('renderReviewedComment', () => {
     expect(comment).toContain('https://github.com/acme/widgets/pull/7');
     expect(comment.toLowerCase()).toContain('approve');
     expect(comment).toContain('Run cost');
+  });
+});
+
+describe('renderPrBody — test-setup disclosure (Phase 15)', () => {
+  it('records the bootstrap under Assumptions so the reviewer sees the framework choice', () => {
+    const body = renderPrBody({
+      spec,
+      plan,
+      review,
+      issueNumber: 42,
+      costSummary: 'cost',
+      testSetupNote: renderTestSetupNote({ runner: 'vitest', action: 'full' }, 'done'),
+    });
+
+    expect(body).toContain('## Assumptions');
+    expect(body).toContain('vitest');
+  });
+
+  it('says nothing when the repo already had a test setup', () => {
+    const body = renderPrBody({ spec, plan, review, issueNumber: 42, costSummary: 'cost' });
+    expect(body).not.toContain('vitest');
   });
 });

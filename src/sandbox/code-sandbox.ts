@@ -18,6 +18,12 @@ export interface CodeSandbox {
   readFiles(paths: string[]): Promise<{ path: string; content: string }[]>;
   /** List the checkout's tracked files (repo-relative paths), for repo-map / example lookups. */
   listFiles(): Promise<string[]>;
+  /**
+   * Run a one-off setup command in the checkout — used by the Phase-15 test-setup bootstrap to add
+   * a test runner. Deliberately named for that purpose rather than a general `exec`: the TDD loop
+   * runs the suite through `runTests`, and repo-supplied commands must never gain a host-side path.
+   */
+  runSetup(command: string): Promise<{ exitCode: number; outputTail: string }>;
   /** Tear the sandbox down. Safe to call once. */
   close(): Promise<void>;
 }
@@ -135,6 +141,11 @@ export async function openCodeSandbox(
         out.push({ path: p, content: Buffer.from(res.stdout.trim(), 'base64').toString('utf-8') });
       }
       return out;
+    },
+
+    async runSetup(command) {
+      const res = await handle.runCommand(command, { cwd: CLONE_DIR, timeoutMs });
+      return { exitCode: res.exitCode, outputTail: tail(res.stdout, res.stderr) };
     },
 
     async listFiles() {

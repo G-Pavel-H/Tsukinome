@@ -6,10 +6,22 @@ export class FakeCodeSandbox implements CodeSandbox {
   readonly files = new Map<string, string>();
   readonly writes: { path: string; content: string }[][] = [];
   readonly testRuns: TestRunStatus[] = [];
+  /** Setup commands run via runSetup(), in order (Phase 15 bootstrap). */
+  readonly setupCommands: string[] = [];
+  /** Exit code returned by runSetup() — set to non-zero to script an install failure. */
+  setupExitCode = 0;
   closed = 0;
 
   /** Queue of test outcomes returned by successive runTests() calls (default: passed). */
   constructor(private readonly queue: TestRunStatus[] = []) {}
+
+  async runSetup(command: string): Promise<{ exitCode: number; outputTail: string }> {
+    this.setupCommands.push(command);
+    return {
+      exitCode: this.setupExitCode,
+      outputTail: this.setupExitCode === 0 ? '' : `setup-failure: ${command}`,
+    };
+  }
 
   async writeFiles(files: { path: string; content: string }[]): Promise<void> {
     this.writes.push(files);
