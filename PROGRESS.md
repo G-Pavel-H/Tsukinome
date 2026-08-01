@@ -22,6 +22,7 @@ Keep this current. It's the source of truth for what's done and what's next.
 - [x] Phase 13a — `Toolchain` abstraction (behaviour-neutral refactor)
 - [x] Phase 13b — first non-TS language pack (Python)  ← live Python run still to verify
 - [x] Phase 14 — Lightweight local embeddings (ONNX via fastembed; torch dropped)  ← gated index run still to verify on a host
+- [x] Phase 15 — Bootstrap a test setup when the repo has none  ← live bootstrap run still to verify
 
 ## Outstanding issues (revisit before calling go-live done)
 
@@ -72,7 +73,8 @@ Keep this current. It's the source of truth for what's done and what's next.
   (BYO) as of Phase 12** — the operator's own key is a fallback behind `ALLOW_PLATFORM_KEY_FALLBACK`.
 - Hand-rolled agent runner + role registry; no agent framework.
 - Target repos: **TypeScript/JavaScript and Python** (Phase 13b). Languages with no toolchain pack
-  are refused gracefully at the intake gate.
+  are refused gracefully at the intake gate. As of **Phase 15** a repo in a supported language
+  needs **no existing test setup** — one is bootstrapped (with consent, verified green) when missing.
 
 ## Decision log
 
@@ -510,10 +512,69 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
     `COCOINDEX_TEST=1 COCOINDEX_PYTHON=… npx vitest run test/index/cocoindex.integration.test.ts` on a
     host, plus a real deploy to confirm the memory envelope on the target plan.
 
+- 2026-08-01 (Phase 15): **Bootstrap a test setup when the repo has none — Tsukinome no longer
+  requires the target repo to already have tests.** Previously a repo with no runner fell off the
+  happy path entirely (`npm test`/`pytest` finds nothing, the loop can never observe red→green),
+  which contradicted "installable on any repo" and excluded exactly the codebases a test-first agent
+  helps most. Delivered as **one PR for both languages** (founder decision): the detection gate, the
+  sandbox seam and the verify-then-commit step are all shared, so a 13-style per-language split would
+  have been lopsided and delayed end-to-end verification. **No new run states, no new job types.**
+  - **Three insertion points.** Detect inside `retrieveCodeContext` (the host checkout is already
+    there at plan time, so it's free); consent at the **existing plan gate** (disclosed in `plan.md`
+    + the gate comment, persisted as `context.bootstrap`, `/approve` covers it); execute in
+    `handleImplement` before the task loop, committing through the existing `commitTaskFiles`.
+  - **Deterministic — no scaffolding agent** (deviation from the plan doc's suggestion). The recipe
+    is a fixed handful of files per language with no variance worth a model call; the constitution
+    already prefers deterministic where possible. Zero tokens, zero flakiness, directly unit-testable.
+  - **Verified before committed — the load-bearing safety property.** Write config + example test →
+    install the runner → run the suite → commit **only if green**. A config that doesn't actually
+    collect tests would make the loop's first red unfixable (the implementer may not edit tests) —
+    exactly the 2026-07-13 false-red failure. Not green → commit nothing, clear comment, graceful
+    `Failed`.
+  - **`Toolchain.bootstrap` recipe + `hasTestRunner` predicate.** TS/JS → vitest (`npm i -D vitest`,
+    `vitest.config.ts` with vitest's defaults written out, `scripts.test` **merged** into the existing
+    package.json, example `test/tsukinome-setup.test.ts`); Python → pytest (`pytest.ini`, a root
+    `conftest.py` that puts the repo root on `sys.path` — without it `import mypkg` from `tests/`
+    doesn't resolve and every generated test is a false red — and `tests/test_tsukinome_setup.py`).
+    `installArtifacts` lists what the install rewrites (`package.json` + lockfile) so the dependency
+    actually lands in the commit.
+  - **`hasTestRunner` is content-aware, not file-existence.** `pyproject.toml` is in Python's
+    `testConfigFiles` and exists in nearly every Python repo, so presence alone must not read as
+    "pytest is configured"; likewise npm's placeholder `test` script (`no test specified`, exits 1)
+    would otherwise look like a permanently red suite. `vite.config.ts` counts only with a `test:`
+    block.
+  - **Three sub-cases.** Runner present → `none` (repo untouched, whether or not it has tests — the
+    test-author writes the first test anyway). No runner + no tests → `full`. No runner + tests
+    present → `runner-only`: add the runner, **never author an example or edit their tests**; if
+    their suite doesn't pass we refuse rather than "fix" it.
+  - **Graceful degradation.** Unreadable checkout (empty `git ls-files`) ≠ "no tests" → verdict left
+    undefined, nothing changes. Supported language whose pack has no recipe → `BootstrapUnavailableError`
+    thrown **before** the Opus plan call, refused with a clear comment.
+  - **Idempotent by construction.** Consent and the live check are separate: bootstrap runs only when
+    consented **and** re-detection in the sandbox still says missing. On a restart the fresh clone
+    already carries the bootstrap commit, so it's a no-op.
+  - **Adjacent fix (same "assumptions about the user's repo" theme):**
+    `TYPESCRIPT_JAVASCRIPT.installCmd` is now `npm ci || npm install` — `npm ci` throws on a missing
+    or stale lockfile at sandbox *open*, before a bootstrap could help, and Python's pack was already
+    tolerant. Fallback only fires after `npm ci` fails, so existing repos are unaffected.
+  - **Drive-by:** `UNSUPPORTED_COMMENT` still claimed "MVP only works on TypeScript/JavaScript" —
+    stale since 13b added Python. Now derived from `TOOLCHAINS`.
+  - **TDD**: `test/toolchain/bootstrap.test.ts` (recipes + `hasTestRunner`),
+    `test/pipeline/test-setup.test.ts` (the three actions + both false-positive guards),
+    `test/pipeline/bootstrap.test.ts` (verify-then-report), plus handler cases in
+    `handle-implement` / `handle-produce-plan` (the latter over a **real** temp git checkout, since
+    detection reads a working tree) and `renderPrBody`. All written red-first. Full suite
+    **328 pass / 24 skipped**, typecheck + lint clean; the pre-existing 286 are the regression guard
+    that repos with a test setup are untouched.
+  - **Not verified live** (gated, like every prior phase's external path): a real issue→PR on a
+    zero-test TS repo and on a zero-test Python repo. Needs the multi-toolchain E2B image already
+    flagged as pending in 13b.
+
 ## Session log
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-08-01 | Phase 15 | ✅ Complete (code + CI; live bootstrap run pending a host) | 328 tests pass (24 gated-skipped), typecheck + lint clean. Tsukinome now works on repos with **no test setup**: detect deterministically at plan time (`src/pipeline/test-setup.ts`), disclose + consent at the existing plan gate, then scaffold and **verify green before committing** it as its own commit (`src/pipeline/bootstrap.ts`), via a new optional `Toolchain.bootstrap` recipe (vitest for TS/JS, pytest for Python) and a narrow `CodeSandbox.runSetup`. No new run states or job types; repos that already have tests take no new path. Also relaxed `npm ci` → `npm ci || npm install` (it threw on a missing lockfile at sandbox open, before anything could recover). Demo: `npx vitest run test/toolchain/bootstrap.test.ts test/pipeline/test-setup.test.ts test/pipeline/bootstrap.test.ts test/worker/handle-implement.test.ts test/worker/handle-produce-plan.test.ts` — a bare repo gets a vitest/pytest setup committed before the feature work, a repo with tests is untouched, a not-green bootstrap commits nothing and stops gracefully, and a pack with no recipe refuses before the Opus plan call. Next: verify live on a zero-test TS repo and a zero-test Python repo (needs the multi-toolchain E2B image).
 - 2026-07-26 | Phase 14 | ✅ Complete (code + CI; gated index run + live memory envelope pending a host) | 286 tests pass (24 gated-skipped), typecheck + lint clean. Dropped PyTorch: the code-index sidecar now embeds the **same** MiniLM model (`all-MiniLM-L6-v2`, 384-dim) on ONNX Runtime via `fastembed` instead of `sentence-transformers`. torch (~2GB, ~1.5GB RAM) OOM'd small hosts; fastembed is ~177MB deps + ~90MB model and peaks ~300MB with `threads=1` + a small batch (both pinned in `sidecar/cocoindex_flow.py`). No dimension change, no migration, zero TS changes — the old Gemini-API plan was rejected (external dep/key/quotas for a best-effort component) and the plan doc's Phase 14 fully rewritten. Demo: `npx vitest run test/index/sidecar-backend.test.ts` (guards the fastembed swap + memory knobs); real `query-embed` on a live fastembed venv returns a 384-dim normalized vector. Next: run the gated `cocoindex.integration.test.ts` on a venv with `cocoindex`+`DATABASE_URL` and confirm the memory envelope on the deployed plan.
 - 2026-07-22 | Phase 12b | ✅ Complete (code + CI; live OAuth run pending a deployed host) | 281 tests pass (24 gated-skipped), typecheck + lint clean. BYO Anthropic key — the OAuth setup page. `GET /setup` → GitHub OAuth → verify the visitor manages the installation (`/user/installations`) → paste + live-validate the key → encrypt/store via the 12a vault; re-visitable to rotate; `installation.deleted` → purge; missing-key refusal now deep-links to the page. Testable core is pure handlers (`src/web/setup-handlers.ts`); real OAuth/validator are gated external adapters. Setup-page config (`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`/`SETUP_BASE_URL`) is optional — unset → "not configured" page, app unaffected. Demo: `npx vitest run test/web test/github/oauth.test.ts test/app.test.ts` — unauthorized user → 403 + nothing stored, bad key → rejected + nothing stored, good key → stored + rotatable, uninstall → purged. Next: Phase 12 done; verify live OAuth + a concurrent two-key run on a deployed host.
 - 2026-07-21 | Phase 12a | ✅ Complete (code + CI; live BYO run pending 12b's setup page) | 258 tests pass (24 gated-skipped), typecheck + lint clean. Bring-your-own Anthropic key — the unit-testable core, no web UI. Built AES-256-GCM secret crypto + `CredentialVault`, `installation_credentials` (migration 009, bytea, on both stores), a per-run `ProviderResolver` (own key → operator fallback flag → `MissingInstallationKeyError`) resolved inside the gateway from `run.installationId` before any spend, and a central terminal refusal in the worker (guidance + fail run + no retry). Config: `MASTER_ENCRYPTION_KEY` now required, `ANTHROPIC_API_KEY` optional, `ALLOW_PLATFORM_KEY_FALLBACK` flag. E2B + the DB pool untouched; the ~25 existing gateway constructions are behaviour-identical (compat constructor). Demo: `npx vitest run test/secrets test/llm/provider-resolver.test.ts test/llm/gateway.test.ts test/worker/missing-key.test.ts` — encrypt/decrypt round-trip, per-installation key isolation, missing-key refuses with zero spend, fallback flag path, uninstall purges. Next: 12b — the OAuth setup page + `installation.deleted` webhook wiring.

@@ -69,6 +69,12 @@ Detection is automatic from the repo's primary language — **no config file nee
 any other language is refused gracefully with a comment (nothing is changed). Support is a
 "language pack" per toolchain (`src/toolchain/`), so adding a language is additive.
 
+**No tests yet? That's fine.** If your repo has no test runner configured, Tsukinome says so at the
+plan gate, and — once you approve — adds a minimal one (vitest or pytest) plus a single trivial
+passing test, as its **own commit** before any feature work. It verifies the suite actually runs
+green before committing anything, and it never touches tests you already have. Repos that already
+have a test setup are completely unaffected.
+
 ---
 
 # Getting started (using Tsukinome)

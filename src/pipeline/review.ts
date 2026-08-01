@@ -32,8 +32,10 @@ export function renderPrBody(input: {
   review: Review;
   issueNumber: number;
   costSummary: string;
+  /** Phase 15: set when Tsukinome had to add a test setup, so the choice is on the record. */
+  testSetupNote?: string;
 }): string {
-  const { spec, plan, review, issueNumber, costSummary } = input;
+  const { spec, plan, review, issueNumber, costSummary, testSetupNote } = input;
   const files = plan.affectedFiles.map((f) => `- \`${f.path}\` (${f.change})`).join('\n');
 
   return [
@@ -57,6 +59,9 @@ export function renderPrBody(input: {
     '',
     '## Assumptions',
     '',
+    // The bootstrap is an assumption Tsukinome made on the maintainer's behalf, so it belongs
+    // here rather than buried in the diff — it is also its own droppable commit.
+    ...(testSetupNote ? [testSetupNote, ''] : []),
     bulletList(spec.assumptions, '_None — the issue was fully specified._'),
     '',
     '## Self-review',
