@@ -529,6 +529,58 @@ Add the Python pack (pip/pytest, its test conventions + source extensions + sand
 
 **Delivered — see `PROGRESS.md` for the dated entry.**
 
+### Phase 15 — Bootstrap a test setup when the repo has none
+
+**The problem we're solving — it's a hard adoption blocker.** Today Tsukinome only works on repos that **already have a working test setup**: a runner it recognises (vitest/jest, or pytest) and a green suite for the TDD loop to run red-before / green-after against. A repo with **no tests at all** falls off the happy path — `npm test` / `pytest` finds nothing to run (or errors), the loop can't observe a red→green transition, and the run stalls or refuses. That directly contradicts the "installable on any repo, no config files required" promise, and it excludes exactly the codebases that would benefit most from a test-first agent: greenfield or historically untested projects. We want Tsukinome to **detect that no test setup exists and bootstrap a minimal one as part of the run**, rather than bouncing the repo.
+
+**Why it's an extension, not a rewrite (context):** most of the machinery is already here — the gap is a detection gate plus a bootstrap step.
+- **The agents can already *see* that tests are missing.** The repo map (`git ls-files` structural view in `src/pipeline/repo-map.ts`) and the toolchain pack already expose where tests would live and what runner config to look for: `Toolchain.testConfigFiles`, `Toolchain.isTestFile`, and `Toolchain.projectManifest`. The planning/authoring agents receive the map, so "there is no runner config and no test file anywhere" is *observable* from context we already pass.
+- **What's missing** is (a) a deterministic pre-check that *classifies* the repo as "no test setup" (so we don't rely on the model noticing), and (b) a **bootstrap step** that installs/configures the runner and commits a minimal scaffolding + one passing example test **before** the normal TDD loop runs — so the red→green gate has a green baseline to build on.
+- **The toolchain seam is the natural home.** Just as each pack carries `installCmd` / `testCmd`, it could carry an optional **`bootstrap` (scaffold) recipe**: the dev-dependency + minimal config + example-test shape for that language. Packs without a recipe degrade to today's graceful refusal.
+
+**Ideas for the solution (to refine — not final technical decisions; implementation left to Claude Code CLI):**
+- **Deterministic detection gate**, reusing the toolchain: classify the repo as *no test setup* when **none** of `testConfigFiles` are present **and** no tracked file matches `isTestFile` **and** the language's run hook is absent (TS/JS: no `test` script in `package.json`; Python: no pytest config). Distinguish the sub-cases (runner-but-no-tests vs tests-but-no-runner vs neither) so each is handled sanely.
+- **A bootstrap step, deterministic where possible, agent where needed.** Add the runner as a dev dependency, write a minimal config the toolchain already knows how to run (`vitest.config.*` + a `test` script for TS/JS; `pyproject.toml` / `pytest.ini` for Python), and commit it on the working branch as **its own reviewable commit/artifact**, distinct from the feature work. A lightweight **scaffolding agent** (or an extension of the Architect/Test-Author) can read the repo map and propose the setup that fits the repo's actual structure, plus one trivial passing example test that proves the runner collects and runs — establishing the green baseline the TDD loop requires.
+- **Make it visible and consented.** Choosing a test framework for someone is opinionated, so surface it: record "this repo had no tests; Tsukinome added a `<runner>` setup" as an explicit assumption in the spec and in the PR body (audit trail), and consider routing it through the existing **plan-approval gate** so the human okays the framework choice before code is written.
+- **Bounded, idempotent, graceful.** Bootstrap at most once per run; skip entirely when a test setup already exists (repos with tests are completely unaffected); and if the resolved language pack has no bootstrap recipe, fall back to today's clear refusal with a specific reason ("no tests found and no scaffolding recipe for `<language>`") rather than failing mid-run.
+
+**Rough exit criteria:** a TS/JS or Python repo with **zero tests** goes issue → (detect: no test setup) → **bootstrap a minimal runner + one green example test, committed as a distinct step** → the normal test-first loop then implements the requested change red→green on top of that baseline → the PR contains both the test-setup bootstrap and the feature work, with the "no tests existed; added setup" decision recorded in the spec/PR; a repo that **already** has tests is untouched (no bootstrap path taken); a supported language with **no** bootstrap recipe degrades gracefully with a clear reason. TS/JS and Python paths both covered (mirror the Phase 13 per-language delivery split if it's cleaner as two PRs).
+
+#### What was actually built (2026-08-01)
+
+Delivered as **one PR covering both languages** — the detection gate, the sandbox seam, the
+verify-then-commit step and the consent plumbing are all shared, so a per-language split would have
+put ~90% of the work in the first PR and delayed end-to-end verification. Three insertion points,
+**no new run states and no new job types**:
+
+1. **Detect at plan time** — inside `retrieveCodeContext` (`src/worker/handlers.ts`), which already
+   has a host checkout. `src/pipeline/test-setup.ts` classifies into `none` / `full` / `runner-only`.
+2. **Consent at the existing plan gate** — the verdict is disclosed in `plan.md` and the gate
+   comment, and `/approve` covers it. Persisted as `context.bootstrap`.
+3. **Execute at implement time** — `handleImplement` runs `src/pipeline/bootstrap.ts` before the
+   task loop and commits via the existing `commitTaskFiles`.
+
+Decisions that differ from the sketch above:
+
+- **Fully deterministic — no scaffolding agent.** The recipe is a fixed handful of files per
+  language with no variance worth a model call, and the green gate makes correctness checkable.
+  Zero tokens, zero flakiness, directly unit-testable.
+- **Verified before committed.** Write config + example test → install the runner → run the suite →
+  commit **only if green**. A runner config that doesn't collect tests would make the loop's first
+  red unfixable (the implementer may not edit tests) — the 2026-07-13 false-red failure mode.
+- **Recorded in `plan.md` + the plan gate comment + the PR body, not the spec.** Detection happens
+  at plan time, *after* the spec artifact is committed, so recording it in the spec would mean
+  rewriting it. The plan is also where consent lives, so the two stay together.
+- **`hasTestRunner` is a per-pack predicate, not a file-existence check.** `pyproject.toml` is in
+  Python's `testConfigFiles` and exists in nearly every Python repo; npm writes a placeholder
+  `test` script that only ever exits 1. Both had to be excluded explicitly.
+- **`runner-only` never authors or edits the repo's tests.** If their existing tests don't pass
+  under the new runner, we refuse rather than "fix" them.
+- **Adjacent fix:** `TYPESCRIPT_JAVASCRIPT.installCmd` is now `npm ci || npm install`. `npm ci`
+  throws on a missing/stale lockfile at sandbox *open* — before any bootstrap could help — and
+  Python's pack was already tolerant (`|| true`).
+
+
 ---
 
 ## 8. Post-launch backlog (v2)

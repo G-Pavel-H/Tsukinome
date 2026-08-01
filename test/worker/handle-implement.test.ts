@@ -240,3 +240,114 @@ describe('handleImplement', () => {
     expect(sandbox.closed).toBe(0); // never opened
   });
 });
+
+describe('handleImplement — test-setup bootstrap (Phase 15)', () => {
+  let store: InMemoryStore;
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  /** A repo with a manifest but nothing that runs tests. */
+  const bareRepo = (sandbox: FakeCodeSandbox) => {
+    sandbox.files.set('package.json', JSON.stringify({ name: 'acme', scripts: { build: 'tsc' } }));
+    sandbox.files.set('src/add.ts', 'export {};');
+  };
+
+  /** One task: bootstrap run (green) then red → green → refactor. */
+  const oneTaskScripts = () => ({
+    provider: new FakeLlmProvider([
+      textResponse(taskList('add')),
+      textResponse(files('test/add.test.ts', 't1')),
+      textResponse(files('src/add.ts', 'i1')),
+      textResponse(files('src/add.ts', 'r1')),
+    ]),
+    sandbox: new FakeCodeSandbox(['passed', 'failed', 'passed', 'passed'] as TestRunStatus[]),
+  });
+
+  it('commits the test setup as its own commit before any task commit', async () => {
+    const runId = await seedImplementingRun(store);
+    await store.updateRunContext(runId, {
+      planData,
+      bootstrap: { runner: 'vitest', action: 'full' },
+    });
+    const { provider, sandbox } = oneTaskScripts();
+    bareRepo(sandbox);
+    const d = deps(store, provider, sandbox);
+
+    await handleImplement(job, d);
+
+    // The runner really was installed in the sandbox, not just configured.
+    expect(sandbox.setupCommands).toEqual(['npm install --save-dev vitest']);
+    expect(d.github.commitFiles).toHaveBeenCalledTimes(2); // setup commit + one task commit
+
+    const [setupCommit, taskCommit] = d.github.commitFiles.mock.calls.map((c) => c[0]);
+    expect(setupCommit.message).toMatch(/test setup/i);
+    expect(setupCommit.files.map((f: { path: string }) => f.path)).toContain('vitest.config.ts');
+    expect(taskCommit.message).not.toMatch(/test setup/i);
+    expect((await store.getRunById(runId))!.state).toBe(RunState.Reviewing);
+  });
+
+  it('leaves a repo that already has a test setup completely untouched', async () => {
+    const runId = await seedImplementingRun(store);
+    // Consent was recorded, but by implement time the repo has a runner (e.g. a restart after the
+    // bootstrap commit already landed) — re-detection wins, so nothing is bootstrapped twice.
+    await store.updateRunContext(runId, {
+      planData,
+      bootstrap: { runner: 'vitest', action: 'full' },
+    });
+    const provider = new FakeLlmProvider([
+      textResponse(taskList('add')),
+      textResponse(files('test/add.test.ts', 't1')),
+      textResponse(files('src/add.ts', 'i1')),
+      textResponse(files('src/add.ts', 'r1')),
+    ]);
+    const sandbox = new FakeCodeSandbox(['failed', 'passed', 'passed'] as TestRunStatus[]);
+    bareRepo(sandbox);
+    sandbox.files.set('vitest.config.ts', 'export default {};'); // already configured
+    const d = deps(store, provider, sandbox);
+
+    await handleImplement(job, d);
+
+    expect(sandbox.setupCommands).toEqual([]); // no install
+    expect(sandbox.files.has('test/tsukinome-setup.test.ts')).toBe(false); // no example test
+    expect(d.github.commitFiles).toHaveBeenCalledTimes(1); // task commit only
+  });
+
+  it('never runs a bootstrap the plan gate did not consent to', async () => {
+    const runId = await seedImplementingRun(store);
+    await store.updateRunContext(runId, { planData }); // no consent recorded
+    const provider = new FakeLlmProvider([
+      textResponse(taskList('add')),
+      textResponse(files('test/add.test.ts', 't1')),
+      textResponse(files('src/add.ts', 'i1')),
+      textResponse(files('src/add.ts', 'r1')),
+    ]);
+    const sandbox = new FakeCodeSandbox(['failed', 'passed', 'passed'] as TestRunStatus[]);
+    bareRepo(sandbox); // no runner, but nobody approved adding one
+    const d = deps(store, provider, sandbox);
+
+    await handleImplement(job, d);
+
+    expect(sandbox.setupCommands).toEqual([]);
+    expect(d.github.commitFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops gracefully and commits nothing when the bootstrap cannot go green', async () => {
+    const runId = await seedImplementingRun(store);
+    await store.updateRunContext(runId, {
+      planData,
+      bootstrap: { runner: 'vitest', action: 'full' },
+    });
+    const provider = new FakeLlmProvider([textResponse(taskList('add'))]);
+    const sandbox = new FakeCodeSandbox(['failed'] as TestRunStatus[]); // bootstrap suite red
+    bareRepo(sandbox);
+    const d = deps(store, provider, sandbox);
+
+    await handleImplement(job, d);
+
+    expect(d.github.commitFiles).not.toHaveBeenCalled();
+    expect((await store.getRunById(runId))!.state).toBe(RunState.Failed);
+    expect(d.github.postIssueComment).toHaveBeenCalled();
+    expect(sandbox.closed).toBe(1);
+  });
+});

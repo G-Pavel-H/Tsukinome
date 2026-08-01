@@ -1,4 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { TYPESCRIPT_JAVASCRIPT } from '../../src/toolchain/toolchain.js';
 import { handleProducePlan, type PlanHandlerDeps } from '../../src/worker/handlers.js';
 import { LlmGateway } from '../../src/llm/gateway.js';
 import { InMemoryStore } from '../../src/store/memory-store.js';
@@ -153,5 +158,96 @@ describe('handleProducePlan', () => {
     // Teardown must still run.
     expect(codeIndex.dropNamespace).toHaveBeenCalledTimes(1);
     expect(clone.cleanup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('handleProducePlan — test-setup detection (Phase 15)', () => {
+  let store: InMemoryStore;
+  const checkouts: string[] = [];
+
+  beforeEach(() => {
+    store = new InMemoryStore();
+  });
+
+  afterAll(async () => {
+    await Promise.all(checkouts.map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  /**
+   * A real git checkout on disk — detection reads the working tree via `git ls-files` + the host
+   * file reader, so an in-memory fake would not exercise the thing under test.
+   */
+  async function realCheckout(files: Record<string, string>): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'tsukinome-detect-'));
+    checkouts.push(dir);
+    for (const [path, content] of Object.entries(files)) {
+      await mkdir(join(dir, dirname(path)), { recursive: true });
+      await writeFile(join(dir, path), content);
+    }
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['add', '-A'], { cwd: dir });
+    return dir;
+  }
+
+  const cloneOf = (dir: string) => {
+    const cleanup = vi.fn();
+    return { fn: vi.fn(async () => ({ dir, cleanup })), cleanup };
+  };
+
+  it('surfaces the missing test setup at the plan gate and records consent', async () => {
+    const runId = await seedSpecifiedRun(store, cleanSpec);
+    const dir = await realCheckout({
+      'package.json': JSON.stringify({ name: 'acme', scripts: { build: 'tsc' } }),
+      'src/report.ts': 'export interface Report {}',
+    });
+    const clone = cloneOf(dir);
+    const { deps, github } = planDeps(store, architectProvider(), { cloneRepo: clone.fn });
+
+    await handleProducePlan(job, deps);
+
+    // The human is told which framework will be added, before approving.
+    expect(github.calls[0]!.body).toContain('vitest');
+    expect(github.calls[0]!.body).toContain('/approve');
+    // Consent is persisted for the implement step to read back.
+    const run = (await store.getRunById(runId))!;
+    expect(run.context.bootstrap).toEqual({ runner: 'vitest', action: 'full' });
+    expect(run.state).toBe(RunState.AwaitingPlanApproval);
+  });
+
+  it('says nothing about test setup for a repo that already has one', async () => {
+    const runId = await seedSpecifiedRun(store, cleanSpec);
+    const dir = await realCheckout({
+      'package.json': JSON.stringify({ name: 'acme', scripts: { test: 'vitest run' } }),
+      'test/report.test.ts': 'it("works", () => {});',
+    });
+    const clone = cloneOf(dir);
+    const { deps, github } = planDeps(store, architectProvider(), { cloneRepo: clone.fn });
+
+    await handleProducePlan(job, deps);
+
+    expect(github.calls[0]!.body).not.toContain('no test runner');
+    expect((await store.getRunById(runId))!.context.bootstrap).toBeUndefined();
+  });
+
+  it('refuses gracefully when the language pack has no scaffolding recipe', async () => {
+    const runId = await seedSpecifiedRun(store, cleanSpec);
+    const dir = await realCheckout({ 'package.json': JSON.stringify({ name: 'acme' }) });
+    const clone = cloneOf(dir);
+    const { deps, github } = planDeps(store, architectProvider(), { cloneRepo: clone.fn });
+
+    const original = TYPESCRIPT_JAVASCRIPT.bootstrap;
+    try {
+      // Simulate a supported language whose pack cannot scaffold a test setup.
+      TYPESCRIPT_JAVASCRIPT.bootstrap = undefined;
+      await handleProducePlan(job, deps);
+    } finally {
+      TYPESCRIPT_JAVASCRIPT.bootstrap = original;
+    }
+
+    const run = (await store.getRunById(runId))!;
+    expect(run.state).toBe(RunState.Failed);
+    expect(github.calls[0]!.body).toMatch(/test runner/i);
+    // Refused before spending the Opus plan call, and nothing was committed.
+    expect(github.commitFile).not.toHaveBeenCalled();
   });
 });

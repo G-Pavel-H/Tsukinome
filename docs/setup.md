@@ -207,3 +207,9 @@ is ever merged without your approval.
   comment) after the attempt cap; a crashed worker's in-flight job is reclaimed by its lease.
 - **Supported repos:** TypeScript/JavaScript and **Python** (Phase 13b); other languages are refused
   gracefully with a comment. Support is a "language pack" per toolchain — see `src/toolchain/`.
+- **Repos with no tests** (Phase 15): a target repo does **not** need an existing test setup. When
+  none is found, the plan gate discloses which runner will be added (vitest / pytest) and, on
+  `/approve`, a minimal setup plus one passing example test lands as its own commit — but only after
+  the suite is verified green. A repo that already has a runner takes no bootstrap path at all. If a
+  supported language ever has no scaffolding recipe, the run refuses with a clear reason instead of
+  failing mid-loop.

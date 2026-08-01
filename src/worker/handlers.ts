@@ -21,7 +21,13 @@ import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { BudgetExhaustedError, type LlmGateway } from '../llm/gateway.js';
 import { runAgent } from '../agents/runner.js';
 import { decompose, readTestConventions, runTaskTdd, type TaskSpec } from '../pipeline/tdd.js';
-import { DEFAULT_TOOLCHAIN, toolchainById, toolchainForLanguage, type Toolchain } from '../toolchain/toolchain.js';
+import {
+  DEFAULT_TOOLCHAIN,
+  TOOLCHAINS,
+  toolchainById,
+  toolchainForLanguage,
+  type Toolchain,
+} from '../toolchain/toolchain.js';
 import {
   IMPL_HELP_CAP,
   renderEscalationComment,
@@ -32,7 +38,7 @@ import {
 } from '../pipeline/implement.js';
 import { renderPrBody, renderPrTitle, renderReviewedComment } from '../pipeline/review.js';
 import { renderCostSummary } from '../pipeline/cost.js';
-import { buildRepoMap } from '../pipeline/repo-map.js';
+import { buildRepoMap, listTrackedFiles } from '../pipeline/repo-map.js';
 import {
   FIX_ROUND_CAP,
   renderFixCapComment,
@@ -50,6 +56,18 @@ import type {
   Spec,
 } from '../pipeline/schemas.js';
 import { renderSpecComment, renderSpecMarkdown } from '../pipeline/spec.js';
+import { runBootstrap } from '../pipeline/bootstrap.js';
+import {
+  BootstrapUnavailableError,
+  detectTestSetup,
+  hostReader,
+  renderBootstrapFailedComment,
+  renderNoRecipeComment,
+  renderTestSetupNote,
+  sandboxReader,
+  type BootstrapConsent,
+  type TestSetupVerdict,
+} from '../pipeline/test-setup.js';
 import {
   CLARIFY_QUESTION_CAP,
   renderClarificationComment,
@@ -172,8 +190,9 @@ export async function handleIssueOpened(job: Job, deps: HandlerDeps): Promise<vo
 }
 
 const UNSUPPORTED_COMMENT = (language: string): string =>
-  `🚫 **Unsupported language.** Tsukinome's MVP only works on TypeScript/JavaScript repos, ` +
-  `but this repo's primary language is **${language}**. I've stopped here — no changes made.`;
+  `🚫 **Unsupported language.** Tsukinome works on ` +
+  `${TOOLCHAINS.map((t) => t.displayName).join(' and ')} repos, but this repo's primary language ` +
+  `is **${language}**. I've stopped here — no changes made.`;
 
 const BUDGET_COMMENT =
   '⏸️ **Stopped — budget reached.** This run hit its per-run cost ceiling before the spec ' +
@@ -330,14 +349,17 @@ function readRunContext(context: Record<string, unknown>): {
   planData?: Plan;
   /** The run's resolved language pack; falls back to the default for runs from before 13b. */
   toolchain: Toolchain;
+  /** Consent recorded at the plan gate to bootstrap a test setup (Phase 15). */
+  bootstrap?: BootstrapConsent;
   questions: string[];
 } {
   const spec = (context.spec as SpecMeta | undefined) ?? {};
   const specData = context.specData as Spec | undefined;
   const planData = context.planData as Plan | undefined;
   const toolchain = toolchainById(context.toolchainId as string | undefined) ?? DEFAULT_TOOLCHAIN;
+  const bootstrap = context.bootstrap as BootstrapConsent | undefined;
   const clarification = context.clarification as ClarificationContext | undefined;
-  return { spec, specData, planData, toolchain, questions: clarification?.questions ?? [] };
+  return { spec, specData, planData, toolchain, bootstrap, questions: clarification?.questions ?? [] };
 }
 
 /** Persisted state of the implementation "stuck" gate (survives the suspend across a human reply). */
@@ -622,7 +644,7 @@ async function retrieveCodeContext(
     /** The run's language pack, so the structural map summarizes the right project manifest. */
     toolchain?: Toolchain;
   },
-): Promise<{ repoMap?: string; chunks: CodeChunk[] }> {
+): Promise<{ repoMap?: string; chunks: CodeChunk[]; testSetup?: TestSetupVerdict }> {
   const { github, codeIndex, cloneRepo, log } = deps;
   const { installationId, owner, repo, issueNumber, runId, query } = args;
 
@@ -661,7 +683,28 @@ async function retrieveCodeContext(
 
     // Structural view of the repo (cheap; complements the semantic retrieval above). Best-effort.
     const repoMap = await buildRepoMap(checkout.dir, { manifest: args.toolchain?.projectManifest });
-    return { repoMap, chunks };
+
+    // Does this repo have a usable test setup (Phase 15)? Deterministic, and free here — the
+    // checkout is already on disk. An empty listing means we couldn't read the repo, which is
+    // NOT the same as "it has no tests", so we leave the verdict undefined and change nothing.
+    let testSetup: TestSetupVerdict | undefined;
+    try {
+      const tracked = await listTrackedFiles(checkout.dir);
+      if (tracked.length > 0) {
+        testSetup = await detectTestSetup(
+          args.toolchain ?? DEFAULT_TOOLCHAIN,
+          tracked,
+          hostReader(checkout.dir),
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { runId, repo: `${owner}/${repo}`, err: err instanceof Error ? err.message : String(err) },
+        'Test-setup detection failed; continuing without it',
+      );
+    }
+
+    return { repoMap, chunks, testSetup };
   } finally {
     await codeIndex.dropNamespace(namespace);
     checkout.cleanup();
@@ -688,14 +731,17 @@ interface ArchitectArgs {
  * **always** torn down (`finally`) so vectors never sit through the approval gate and no
  * checkout leaks. Returns the structured plan.
  */
-async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs): Promise<Plan> {
+async function runArchitectAndCommit(
+  deps: PlanHandlerDeps,
+  args: ArchitectArgs,
+): Promise<{ plan: Plan; bootstrap?: BootstrapConsent }> {
   const { store, github, gateway, log } = deps;
   const { installationId, owner, repo, issueNumber, runId } = args;
 
   // Clone + index + repo map (best-effort; teardown handled inside). The Architect plans from the
   // spec alone if the index is unavailable.
   const query = [args.spec.summary, ...args.spec.requirements.map((r) => r.statement)].join('\n');
-  const { repoMap, chunks } = await retrieveCodeContext(deps, {
+  const { repoMap, chunks, testSetup } = await retrieveCodeContext(deps, {
     installationId,
     owner,
     repo,
@@ -705,6 +751,16 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
     toolchain: args.toolchain,
   });
 
+  // A repo with no test runner can't support a test-first loop. If this pack has no scaffolding
+  // recipe there is nothing we can do about it — refuse now, before spending the Opus plan call.
+  const toolchain = args.toolchain ?? DEFAULT_TOOLCHAIN;
+  const needsBootstrap = testSetup !== undefined && testSetup.action !== 'none';
+  if (needsBootstrap && !toolchain.bootstrap) throw new BootstrapUnavailableError(toolchain);
+  const bootstrap: BootstrapConsent | undefined =
+    needsBootstrap && toolchain.bootstrap
+      ? { runner: toolchain.bootstrap.runner, action: testSetup!.action as BootstrapConsent['action'] }
+      : undefined;
+
   const sections = [
     `Functional spec (markdown):\n${args.specMarkdown}`,
     repoMap ? repoMap : '## Repository file map\n(unavailable)',
@@ -712,6 +768,13 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
       chunks.length ? renderChunks(chunks) : '(code index unavailable — plan from the spec)'
     }`,
   ];
+  if (bootstrap) {
+    sections.push(
+      `Test setup: this repo has NO test runner. Before your plan is implemented, a minimal ` +
+        `${bootstrap.runner} setup will be added as a separate first commit. Plan the work on the ` +
+        `assumption that ${bootstrap.runner} is available; do not make setting it up a task.`,
+    );
+  }
   if (args.feedback) {
     sections.push(
       `Previous plan (markdown):\n${args.previousPlanMarkdown ?? '(none)'}`,
@@ -725,7 +788,11 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
     { runId, gateway, log },
   );
 
-  const markdown = renderPlanMarkdown(result.output!, { issueNumber, title: args.title });
+  const markdown = renderPlanMarkdown(result.output!, {
+    issueNumber,
+    title: args.title,
+    testSetupNote: bootstrap ? renderTestSetupNote(bootstrap, 'planned') : undefined,
+  });
   const committed = await commitPlan(github, { installationId, owner, repo, issueNumber, markdown });
   await store.recordArtifact({
     runId,
@@ -734,7 +801,7 @@ async function runArchitectAndCommit(deps: PlanHandlerDeps, args: ArchitectArgs)
     content: markdown,
     commitSha: committed.commitSha,
   });
-  return result.output!;
+  return { plan: result.output!, bootstrap };
 }
 
 /**
@@ -797,7 +864,7 @@ export async function handleProducePlan(job: Job, deps: PlanHandlerDeps): Promis
   await store.updateRunState(run.id, RunState.Planning);
 
   try {
-    const plan = await runArchitectAndCommit(deps, {
+    const { plan, bootstrap } = await runArchitectAndCommit(deps, {
       installationId,
       owner,
       repo,
@@ -809,17 +876,34 @@ export async function handleProducePlan(job: Job, deps: PlanHandlerDeps): Promis
       toolchain,
     });
 
-    await store.updateRunContext(run.id, { ...run.context, planData: plan });
+    // Persist the bootstrap decision as the consent record: approving this plan approves adding
+    // the test setup, and `handleImplement` reads it back rather than deciding on its own.
+    await store.updateRunContext(run.id, { ...run.context, planData: plan, bootstrap });
     await github.postIssueComment({
       installationId,
       owner,
       repo,
       issueNumber,
-      body: renderPlanGateComment(specData, plan),
+      body: renderPlanGateComment(specData, plan, bootstrap && renderTestSetupNote(bootstrap, 'planned')),
     });
     await store.updateRunState(run.id, RunState.AwaitingPlanApproval);
     log.info({ runId: run.id, repo: repoLabel }, 'Plan produced; parked awaiting approval');
   } catch (err) {
+    if (err instanceof BootstrapUnavailableError) {
+      await github.postIssueComment({
+        installationId,
+        owner,
+        repo,
+        issueNumber,
+        body: renderNoRecipeComment(err.toolchain),
+      });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn(
+        { runId: run.id, repo: repoLabel, toolchain: err.toolchain.id },
+        'Stopped: repo has no test setup and this language pack has no scaffolding recipe',
+      );
+      return;
+    }
     if (err instanceof BudgetExhaustedError) {
       await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
       await store.updateRunState(run.id, RunState.Failed);
@@ -890,7 +974,7 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
   await store.updateRunState(run.id, RunState.Planning);
 
   try {
-    const plan = await runArchitectAndCommit(deps, {
+    const { plan, bootstrap } = await runArchitectAndCommit(deps, {
       installationId,
       owner,
       repo,
@@ -907,6 +991,7 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
     await store.updateRunContext(run.id, {
       ...run.context,
       planData: plan,
+      bootstrap,
       plan: { revisions: revisions + 1 },
     });
     await github.postIssueComment({
@@ -914,11 +999,23 @@ export async function handleResumePlanDecision(job: Job, deps: PlanHandlerDeps):
       owner,
       repo,
       issueNumber,
-      body: renderPlanGateComment(specData, plan),
+      body: renderPlanGateComment(specData, plan, bootstrap && renderTestSetupNote(bootstrap, 'planned')),
     });
     await store.updateRunState(run.id, RunState.AwaitingPlanApproval);
     log.info({ runId: run.id, repo: repoLabel, revision: revisions + 1 }, 'Plan revised; re-parked');
   } catch (err) {
+    if (err instanceof BootstrapUnavailableError) {
+      await github.postIssueComment({
+        installationId,
+        owner,
+        repo,
+        issueNumber,
+        body: renderNoRecipeComment(err.toolchain),
+      });
+      await store.updateRunState(run.id, RunState.Failed);
+      log.warn({ runId: run.id, repo: repoLabel }, 'Stopped: no test setup and no scaffolding recipe');
+      return;
+    }
     if (err instanceof BudgetExhaustedError) {
       await github.postIssueComment({ installationId, owner, repo, issueNumber, body: BUDGET_COMMENT });
       await store.updateRunState(run.id, RunState.Failed);
@@ -963,7 +1060,7 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
     return;
   }
 
-  const { planData, toolchain } = readRunContext(run.context);
+  const { planData, toolchain, bootstrap } = readRunContext(run.context);
   const affectedPaths = planData?.affectedFiles.map((f) => f.path) ?? [];
 
   const token = await github.getInstallationToken({ installationId, owner, repo });
@@ -973,6 +1070,46 @@ export async function handleImplement(job: Job, deps: ImplementHandlerDeps): Pro
   );
 
   try {
+    // --- Test-setup bootstrap (Phase 15) ---
+    // Runs only when the plan gate consented AND the checkout still lacks a runner, so a restart
+    // after the bootstrap commit already landed is a no-op. The scaffolding is verified green
+    // before it is committed — we never build a TDD loop on an unproven baseline.
+    if (bootstrap) {
+      const tracked = await sandbox.listFiles();
+      const verdict = await detectTestSetup(toolchain, tracked, sandboxReader(sandbox));
+      if (verdict.action !== 'none') {
+        const result = await runBootstrap(toolchain, verdict.action, sandbox, log);
+        if (result.status !== 'green') {
+          await github.postIssueComment({
+            installationId,
+            owner,
+            repo,
+            issueNumber,
+            body: renderBootstrapFailedComment(result.runner ?? toolchain.displayName, result.outputTail),
+          });
+          await store.updateRunState(run.id, RunState.Failed);
+          log.warn(
+            { runId: run.id, repo: repoLabel, status: result.status },
+            'Stopped: test-setup bootstrap could not reach green',
+          );
+          return;
+        }
+        const setupFiles = await sandbox.readFiles(result.changedPaths);
+        const setupCommit = await commitTaskFiles(github, {
+          installationId,
+          owner,
+          repo,
+          issueNumber,
+          files: setupFiles,
+          message: `Tsukinome: add ${result.runner} test setup (#${issueNumber})`,
+        });
+        log.info(
+          { runId: run.id, repo: repoLabel, runner: result.runner, commit: setupCommit.commitSha },
+          'Bootstrapped a test setup; committed as its own commit',
+        );
+      }
+    }
+
     // Decompose once; on a restart the tasks already exist and we resume.
     let tasks = await store.getTasks(run.id);
     if (tasks.length === 0) {
@@ -1206,7 +1343,7 @@ export async function handleReview(job: Job, deps: SpecHandlerDeps): Promise<voi
     await store.getArtifact(run.id, 'spec'),
     await store.getArtifact(run.id, 'plan'),
   ];
-  const { spec: meta, specData, planData } = readRunContext(run.context);
+  const { spec: meta, specData, planData, bootstrap } = readRunContext(run.context);
   if (!specArtifact || !planArtifact || !specData || !planData) {
     log.warn({ runId: run.id, repo: repoLabel }, 'review without spec/plan; skipping');
     return;
@@ -1239,7 +1376,14 @@ export async function handleReview(job: Job, deps: SpecHandlerDeps): Promise<voi
       repo,
       issueNumber,
       title: renderPrTitle({ title: meta.title ?? `Issue #${issueNumber}` }, issueNumber),
-      body: renderPrBody({ spec: specData, plan: planData, review: review.output!, issueNumber, costSummary }),
+      body: renderPrBody({
+        spec: specData,
+        plan: planData,
+        review: review.output!,
+        issueNumber,
+        costSummary,
+        testSetupNote: bootstrap ? renderTestSetupNote(bootstrap, 'done') : undefined,
+      }),
     });
 
     await github.postIssueComment({

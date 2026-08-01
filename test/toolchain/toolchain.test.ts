@@ -13,7 +13,10 @@ describe('typescript-javascript pack', () => {
   it('encodes the current hardcoded TS/JS behaviour', () => {
     // These are the exact commands/extensions that were hardcoded before the Toolchain
     // abstraction. Pinning them here makes the 13a refactor provably behaviour-neutral.
-    expect(TYPESCRIPT_JAVASCRIPT.installCmd).toBe('npm ci');
+    // `npm ci` throws outright on a missing or stale lockfile — and it runs at sandbox *open*,
+    // before the Phase-15 bootstrap could help. The fallback only fires when `npm ci` fails, so
+    // repos with a valid lockfile behave exactly as before. (Python's pack is already tolerant.)
+    expect(TYPESCRIPT_JAVASCRIPT.installCmd).toBe('npm ci || npm install');
     expect(TYPESCRIPT_JAVASCRIPT.testCmd).toBe('npm test');
     expect(TYPESCRIPT_JAVASCRIPT.projectManifest).toBe('package.json');
     expect(TYPESCRIPT_JAVASCRIPT.sourceExts).toEqual(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts']);
