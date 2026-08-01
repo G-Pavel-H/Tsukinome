@@ -24,6 +24,7 @@ import { decompose, readTestConventions, runTaskTdd, type TaskSpec } from '../pi
 import {
   DEFAULT_TOOLCHAIN,
   TOOLCHAINS,
+  detectToolchain,
   toolchainById,
   toolchainForLanguage,
   type Toolchain,
@@ -224,10 +225,25 @@ export async function handleProduceSpec(job: Job, deps: SpecHandlerDeps): Promis
   await store.updateRunState(run.id, RunState.Specifying);
 
   // Deterministic capability gate — refuse repos we have no language pack for, before spending
-  // any tokens. A null/blank detected language resolves to the default pack (can't tell → proceed);
-  // a known-but-unsupported language resolves to no pack and is refused gracefully.
+  // any tokens.
+  //
+  // Resolution is **manifest-first**: GitHub's primary language is a byte count across the whole
+  // repo, so a polyglot monorepo whose target lives in the minority language resolves to the wrong
+  // pack (the 2026-08-01 incident: an Angular frontend detected as Python, then `pip`/`pytest` run
+  // against it). The project's own manifests are the stronger signal. Falls back to the primary
+  // language when no manifest is recognisable, and only refuses when BOTH signals come up empty —
+  // strictly more permissive than the language-only gate it replaces.
   const language = await github.getRepoLanguage({ installationId, owner, repo });
-  const toolchain = toolchainForLanguage(language);
+  let rootFiles: string[] = [];
+  try {
+    rootFiles = await github.getRepoRootFiles({ installationId, owner, repo });
+  } catch (err) {
+    log.warn(
+      { runId: run.id, repo: repoLabel, err: err instanceof Error ? err.message : String(err) },
+      'Could not list repo root; falling back to the primary language',
+    );
+  }
+  const toolchain = detectToolchain(rootFiles) ?? toolchainForLanguage(language);
   if (!toolchain) {
     await github.postIssueComment({
       installationId,

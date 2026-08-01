@@ -44,6 +44,22 @@ export interface OpenCodeSandboxDeps {
   toolchain?: Toolchain;
 }
 
+/**
+ * The sandbox could not be prepared — the clone or the dependency install failed. This is a
+ * property of the repo + image, not a transient blip: `python: command not found` cannot become
+ * true on the next attempt. The worker treats it as terminal and refuses once, rather than
+ * burning the retry budget (same reasoning as `MissingInstallationKeyError`).
+ */
+export class SandboxSetupError extends Error {
+  constructor(
+    readonly command: string,
+    readonly outputTail: string,
+  ) {
+    super(`${command} failed: ${outputTail}`);
+    this.name = 'SandboxSetupError';
+  }
+}
+
 const CLONE_DIR = 'repo';
 const OUTPUT_TAIL_CAP = 4000;
 export const DEFAULT_SESSION_TIMEOUT_MS = 5 * 60_000;
@@ -105,11 +121,11 @@ export async function openCodeSandbox(
       { timeoutMs },
     );
     if (clone.exitCode !== 0) {
-      throw new Error(`clone failed: ${redact(clone.stderr || clone.stdout, token)}`);
+      throw new SandboxSetupError('git clone', redact(clone.stderr || clone.stdout, token));
     }
     const install = await handle.runCommand(toolchain.installCmd, { cwd: CLONE_DIR, timeoutMs });
     if (install.exitCode !== 0) {
-      throw new Error(`${toolchain.installCmd} failed: ${tail(install.stdout, install.stderr)}`);
+      throw new SandboxSetupError(toolchain.installCmd, tail(install.stdout, install.stderr));
     }
   } catch (err) {
     await handle.kill().catch(() => {});

@@ -5,7 +5,7 @@ import type { SandboxProvider } from '../sandbox/types.js';
 import type { LlmGateway } from '../llm/gateway.js';
 import { MissingInstallationKeyError } from '../llm/provider-resolver.js';
 import type { CodeIndex } from '../index/types.js';
-import type { OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
+import { SandboxSetupError, type OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { MAX_JOB_ATTEMPTS, JOB_BACKOFF_BASE_MS, DEFAULT_JOB_LEASE_MS } from './retry.js';
 import { sweepStaleRuns, STALE_SWEEP_INTERVAL_MS } from './stale.js';
 import {
@@ -138,6 +138,38 @@ async function refuseForMissingKey(
   }
 }
 
+const sandboxSetupComment = (command: string, outputTail: string): string =>
+  `🛑 **I couldn't prepare a working environment for this repo.** Setting up the sandbox failed, ` +
+  `and that won't change on a retry — so I've stopped rather than keep trying.\n\n` +
+  `Failed command: \`${command}\`\n\n` +
+  (outputTail ? `<details><summary>Output</summary>\n\n\`\`\`\n${outputTail}\n\`\`\`\n\n</details>\n\n` : '') +
+  `This usually means the repo's dependencies can't install, or the sandbox image is missing a ` +
+  `runtime the repo needs. Once that's sorted, open a new issue and I'll pick it up.`;
+
+/** Terminal refusal for a deterministic environment failure — no retry, run closed cleanly. */
+async function refuseForSandboxSetup(
+  job: Job,
+  err: SandboxSetupError,
+  deps: WorkerDeps,
+): Promise<void> {
+  const coords = issueCoordsFromPayload(job.payload);
+  const run = await deps.store.getRun(coords);
+  if (run) await deps.store.updateRunState(run.id, RunState.Failed);
+  deps.log.error(
+    { jobId: job.id, type: job.type, command: err.command },
+    'Refused: sandbox environment could not be prepared',
+  );
+  try {
+    await deps.github.postIssueComment({
+      ...coords,
+      body: sandboxSetupComment(err.command, err.outputTail),
+    });
+  } catch (commentErr) {
+    const m = commentErr instanceof Error ? commentErr.message : String(commentErr);
+    deps.log.error({ jobId: job.id, err: m }, 'Failed to post sandbox-setup comment');
+  }
+}
+
 /**
  * Claim and process at most one job. Returns true if a job was handled, false if
  * the queue was empty. A throwing handler is retried with backoff (Phase 11); once
@@ -158,6 +190,13 @@ export async function processNextJob(deps: WorkerDeps): Promise<boolean> {
       await deps.store.markJobDone(job.id);
       return true;
     }
+    // A sandbox that can't be prepared is equally terminal — retrying re-runs the same failing
+    // command against the same image (the `python: command not found` incident, 2026-08-01).
+    if (err instanceof SandboxSetupError) {
+      await refuseForSandboxSetup(job, err, deps);
+      await deps.store.markJobDone(job.id);
+      return true;
+    }
     const message = err instanceof Error ? err.message : String(err);
     const result = await deps.store.failOrRetryJob(job.id, message, {
       maxAttempts: MAX_JOB_ATTEMPTS,
@@ -168,10 +207,23 @@ export async function processNextJob(deps: WorkerDeps): Promise<boolean> {
         { jobId: job.id, type: job.type, attempts: result.attempts, err: message },
         'Job dead-lettered after exhausting retries',
       );
+      // Close the run too. Without this it stays in whatever transient state it was in
+      // (`planning`, `implementing`, …) — none of which are in STALE_STATES, so the sweeper
+      // never visits them and the run is stranded forever.
+      const coords = issueCoordsFromPayload(job.payload);
+      try {
+        const run = await deps.store.getRun(coords);
+        if (run && run.state !== RunState.Failed) {
+          await deps.store.updateRunState(run.id, RunState.Failed);
+        }
+      } catch (stateErr) {
+        const m = stateErr instanceof Error ? stateErr.message : String(stateErr);
+        deps.log.error({ jobId: job.id, err: m }, 'Failed to close dead-lettered run');
+      }
       // Best-effort: a failure to comment must not crash the worker loop.
       try {
         await deps.github.postIssueComment({
-          ...issueCoordsFromPayload(job.payload),
+          ...coords,
           body: DEAD_LETTER_COMMENT,
         });
       } catch (commentErr) {
