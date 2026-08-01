@@ -110,8 +110,31 @@ repo would have failed loudly at install; with a multi-toolchain image it would 
 quietly committed `pytest.ini` + `conftest.py` into an Angular repo. Manifest-first detection
 removes the trigger; the gap in the gate itself remains.
 
-**Still outstanding from this incident:** the multi-toolchain E2B image (Node + Python) from Phase
-13b is still unbuilt, so genuine Python repos cannot run at all yet.
+**Root cause behind the root cause: Phase 13b was marked ✅ Complete while its own exit criterion
+("a real Python repo goes issue → green, test-first PR") had never once been met.** The code was
+genuinely finished and CI-covered; the missing piece lived outside the repo — an E2B template with
+Python in it. The project's "complete = code + CI green, live verification gated" convention is
+fine for a detail we haven't observed (prompt-cache hits, say), but here it hid a headline
+capability that simply did not function.
+
+**Resolved 2026-08-02.** `e2b.Dockerfile` now installs Python 3 + pip on top of `node:22` —
+`python-is-python3` is load-bearing (the pack invokes `python`; Debian ships only `python3`), and
+`PIP_BREAK_SYSTEM_PACKAGES=1` is safe because the sandbox is an ephemeral microVM (PEP 668).
+Template **`tsukinome-sandbox`** is built and verified live: `node v22.23.1`, `git 2.39.5`,
+`Python 3.11.2`, `pip 23.0.1`. Set `E2B_TEMPLATE=tsukinome-sandbox`.
+
+**CLI note:** `e2b template build` is **gone**, not merely deprecated — it now ignores all options
+and exits 1 with a migration banner. Use **`e2b template create <name> --dockerfile e2b.Dockerfile`**,
+which still reads a Dockerfile directly (no SDK migration needed). `e2b template migrate` converts
+to the v2 SDK format, but note v2 defaults to a **non-root** user, which would break the
+`apt-get install` in this image — migration is not a no-op.
+
+**Watch the sandbox RAM.** `tsukinome-sandbox` was built at **1024 MiB**; the old
+`tsukinome-node22` had **2048 MiB**. The sandbox runs `npm ci` + full suites for arbitrary repos,
+so rebuild with `--memory-mb 2048` if installs start failing oddly.
+
+**Apply the same skepticism to the other code-complete-but-unproven phases:** 12b (BYO-key OAuth,
+never run live) and 15 (test-setup bootstrap, never run live).
 
 ## Locked decisions
 
