@@ -28,6 +28,8 @@ export interface FakeGitHubOpts {
   issueTitle?: string;
   issueBody?: string;
   diff?: string;
+  /** Repo-root file names, for content-based toolchain detection. */
+  rootFiles?: string[];
 }
 
 /** A GitHubClient whose methods are spies, with an optional failure mode. */
@@ -37,6 +39,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
   getInstallationToken: ReturnType<typeof vi.fn>;
   getIssue: ReturnType<typeof vi.fn>;
   getRepoLanguage: ReturnType<typeof vi.fn>;
+  getRepoRootFiles: ReturnType<typeof vi.fn>;
   commitFile: ReturnType<typeof vi.fn>;
   commitFiles: ReturnType<typeof vi.fn>;
   compareDiff: ReturnType<typeof vi.fn>;
@@ -56,6 +59,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
   const getRepoLanguage = vi.fn(async (_input: RepoLanguageInput) =>
     opts.language === undefined ? 'TypeScript' : opts.language,
   );
+  const getRepoRootFiles = vi.fn(async (_input: RepoLanguageInput) => opts.rootFiles ?? []);
   const commitFile = vi.fn(async (input: CommitFileInput) => ({
     commitSha: 'deadbeefcafe',
     branch: input.branch,
@@ -77,6 +81,7 @@ export function fakeGitHub(opts: FakeGitHubOpts = {}): GitHubClient & {
     getInstallationToken,
     getIssue,
     getRepoLanguage,
+    getRepoRootFiles,
     commitFile,
     commitFiles,
     compareDiff,

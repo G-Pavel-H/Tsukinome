@@ -62,6 +62,67 @@ Keep this current. It's the source of truth for what's done and what's next.
   **already-tested** output is un-greenable because the implementer can't edit existing tests — the
   loop could detect "my change broke a *pre-existing* test" and route back.)
 
+## Incident log
+
+### 2026-08-01 — Angular repo detected as Python; run stranded in `implementing`
+
+**Symptom.** A live run on `G-Pavel-H/RaptorVisualiser` (Angular frontend + Python backend/scripts)
+produced an all-TypeScript plan, then the `implement` job died three times on
+`python -m pip install … failed: /bin/bash: line 1: python: command not found`, dead-lettered, and
+the run sat in `implementing` forever.
+
+**Three separate faults, stacked.**
+
+1. **Wrong toolchain.** `handleProduceSpec` resolved the pack from `getRepoLanguage()` alone —
+   GitHub's *byte-count* primary language across the whole repo. For a polyglot monorepo whose
+   target lives in the minority language, that disagrees with the plan (which is LLM output from
+   the issue text, i.e. about the frontend). `detectToolchain(files)` — content-based, added in
+   13a precisely because it is "more reliable than GitHub's byte-count primary language for
+   polyglot repos" — existed, was exported, was unit-tested, and **was called from nowhere**.
+2. **Pointless retries.** `python: command not found` cannot become true on attempt 2 or 3. The
+   job burned the full retry budget and a fresh E2B microVM per attempt to learn nothing.
+3. **Stranded run.** Dead-lettering marked the *job* failed and commented, but never touched the
+   *run*. It stayed in `implementing`, which is not in `STALE_STATES`, so the sweeper never
+   visited it. Non-terminal + not-swept = stuck forever. This applied to **every** transient
+   state, not just this one.
+
+**Fixes (2026-08-01, branch `fix/toolchain-detection-and-stranded-runs`).**
+
+- **Manifest-first toolchain resolution.** New `GitHubClient.getRepoRootFiles` (one contents API
+  call, no clone) feeds `detectToolchain(rootFiles) ?? toolchainForLanguage(language)`. Refuses
+  only when **both** signals come up empty — strictly more permissive than the language-only gate,
+  so no repo that worked before stops working. A repo with a `package.json` is now workable even
+  if linguist calls it Ruby.
+- **`SandboxSetupError`** (`src/sandbox/code-sandbox.ts`) for a failed clone/install, caught in
+  `processNextJob` as **terminal — no retry**, exactly like `MissingInstallationKeyError`. Posts a
+  comment naming the failed command with the output, and closes the run.
+- **Dead-letter now closes the run** (`RunState.Failed`) before commenting, so no run can be left
+  in a transient state the sweeper never sweeps.
+
+**Known limitation, deliberately not fixed.** `detectToolchain` on a repo with *both* manifests
+returns the first registry match (TS/JS) — that is registry order, not judgement. A principled
+answer would consider which directory the change actually touches. Manifest-first still beats
+byte-count, and `.tsukinome/config.yml` (Phase 2.1) is the real fix.
+
+**Related Phase 15 exposure (unchanged, worth knowing).** The test-setup bootstrap's green gate
+proves the runner *works*, not that it is the *right ecosystem*. Before this fix, a mis-detected
+repo would have failed loudly at install; with a multi-toolchain image it would instead have
+quietly committed `pytest.ini` + `conftest.py` into an Angular repo. Manifest-first detection
+removes the trigger; the gap in the gate itself remains.
+
+**Root cause behind the root cause: Phase 13b was marked ✅ Complete while its own exit criterion
+("a real Python repo goes issue → green, test-first PR") had never once been met.** The code was
+genuinely finished and CI-covered; the missing piece lived outside the repo — an E2B template with
+Python in it. The project's "complete = code + CI green, live verification gated" convention is
+fine for a detail we haven't observed (prompt-cache hits, say), but here it hid a headline
+capability that simply did not function. **`e2b.Dockerfile` now installs Python 3 + pip**
+(incl. `python-is-python3` — the pack invokes `python`, and Debian ships only `python3`), so the
+image is genuinely multi-toolchain. It still has to be **rebuilt and registered by hand**
+(`e2b template build`) before any Python repo works.
+
+**Apply the same skepticism to the other code-complete-but-unproven phases:** 12b (BYO-key OAuth,
+never run live) and 15 (test-setup bootstrap, never run live).
+
 ## Locked decisions
 
 - Language: TypeScript throughout.
@@ -574,6 +635,7 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-08-01 | Fix | ✅ Complete | 335 tests pass (24 gated-skipped), typecheck + lint clean. Post-Phase-15 incident fix — see the Incident log. Toolchain resolution is now **manifest-first** (`getRepoRootFiles` → `detectToolchain` → `toolchainForLanguage`), a failed sandbox clone/install raises `SandboxSetupError` and is **terminal, not retried**, and a dead-lettered job now closes its run so nothing is stranded in a transient state. Demo: `npx vitest run test/worker/handle-produce-spec.test.ts test/worker/worker.test.ts` — an Angular repo whose primary language is Python resolves to TS/JS, a repo supported by manifest but not language is accepted, both signals empty still refuses, a sandbox setup failure refuses once with no retry, and a dead-letter leaves the run `failed`.
 - 2026-08-01 | Phase 15 | ✅ Complete (code + CI; live bootstrap run pending a host) | 328 tests pass (24 gated-skipped), typecheck + lint clean. Tsukinome now works on repos with **no test setup**: detect deterministically at plan time (`src/pipeline/test-setup.ts`), disclose + consent at the existing plan gate, then scaffold and **verify green before committing** it as its own commit (`src/pipeline/bootstrap.ts`), via a new optional `Toolchain.bootstrap` recipe (vitest for TS/JS, pytest for Python) and a narrow `CodeSandbox.runSetup`. No new run states or job types; repos that already have tests take no new path. Also relaxed `npm ci` → `npm ci || npm install` (it threw on a missing lockfile at sandbox open, before anything could recover). Demo: `npx vitest run test/toolchain/bootstrap.test.ts test/pipeline/test-setup.test.ts test/pipeline/bootstrap.test.ts test/worker/handle-implement.test.ts test/worker/handle-produce-plan.test.ts` — a bare repo gets a vitest/pytest setup committed before the feature work, a repo with tests is untouched, a not-green bootstrap commits nothing and stops gracefully, and a pack with no recipe refuses before the Opus plan call. Next: verify live on a zero-test TS repo and a zero-test Python repo (needs the multi-toolchain E2B image).
 - 2026-07-26 | Phase 14 | ✅ Complete (code + CI; gated index run + live memory envelope pending a host) | 286 tests pass (24 gated-skipped), typecheck + lint clean. Dropped PyTorch: the code-index sidecar now embeds the **same** MiniLM model (`all-MiniLM-L6-v2`, 384-dim) on ONNX Runtime via `fastembed` instead of `sentence-transformers`. torch (~2GB, ~1.5GB RAM) OOM'd small hosts; fastembed is ~177MB deps + ~90MB model and peaks ~300MB with `threads=1` + a small batch (both pinned in `sidecar/cocoindex_flow.py`). No dimension change, no migration, zero TS changes — the old Gemini-API plan was rejected (external dep/key/quotas for a best-effort component) and the plan doc's Phase 14 fully rewritten. Demo: `npx vitest run test/index/sidecar-backend.test.ts` (guards the fastembed swap + memory knobs); real `query-embed` on a live fastembed venv returns a 384-dim normalized vector. Next: run the gated `cocoindex.integration.test.ts` on a venv with `cocoindex`+`DATABASE_URL` and confirm the memory envelope on the deployed plan.
 - 2026-07-22 | Phase 12b | ✅ Complete (code + CI; live OAuth run pending a deployed host) | 281 tests pass (24 gated-skipped), typecheck + lint clean. BYO Anthropic key — the OAuth setup page. `GET /setup` → GitHub OAuth → verify the visitor manages the installation (`/user/installations`) → paste + live-validate the key → encrypt/store via the 12a vault; re-visitable to rotate; `installation.deleted` → purge; missing-key refusal now deep-links to the page. Testable core is pure handlers (`src/web/setup-handlers.ts`); real OAuth/validator are gated external adapters. Setup-page config (`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`/`SETUP_BASE_URL`) is optional — unset → "not configured" page, app unaffected. Demo: `npx vitest run test/web test/github/oauth.test.ts test/app.test.ts` — unauthorized user → 403 + nothing stored, bad key → rejected + nothing stored, good key → stored + rotatable, uninstall → purged. Next: Phase 12 done; verify live OAuth + a concurrent two-key run on a deployed host.
