@@ -1,4 +1,4 @@
-import type { GitHubClient } from '../github/client.js';
+import { isNotFoundError, type GitHubClient } from '../github/client.js';
 import type { Logger } from '../log.js';
 import { RunState, type Run, type Store } from '../store/types.js';
 
@@ -72,6 +72,19 @@ export async function sweepStaleRuns(deps: StaleSweepDeps, now: number = Date.no
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // A 404 means the installation or the issue is gone — there is nobody left to notify, and
+      // that will never change. Close the run rather than re-picking it every hour forever
+      // (the comment is posted *before* the state change, so a throw used to leave it un-pinged
+      // and un-closed, i.e. permanently stuck in the sweep). Transient errors still just log and
+      // are retried on the next sweep.
+      if (isNotFoundError(err)) {
+        await store.updateRunState(run.id, RunState.Aborted);
+        log.warn(
+          { runId: run.id, state: run.state, installationId: run.installationId },
+          'Closed run: installation or issue is unreachable',
+        );
+        continue;
+      }
       log.error({ runId: run.id, err: message }, 'Stale-run sweep failed for run');
     }
   }

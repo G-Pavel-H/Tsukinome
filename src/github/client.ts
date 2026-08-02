@@ -97,6 +97,21 @@ export interface ReplyToReviewCommentInput {
  * The GitHub actions the worker needs. Kept narrow so the worker depends on an
  * interface, not Octokit — tests inject a spy, production injects Probot auth.
  */
+/**
+ * Is this error GitHub telling us the thing we addressed does not exist? Two cases matter, and
+ * both are permanent: the App cannot mint a token for that installation (it belongs to a different
+ * App, or it was uninstalled), or the repo/issue itself is gone. Retrying either forever is waste —
+ * see the 2026-08-02 stale-sweep incident.
+ */
+export function isNotFoundError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'status' in err &&
+    (err as { status?: unknown }).status === 404
+  );
+}
+
 export interface GitHubClient {
   postIssueComment(input: PostIssueCommentInput): Promise<void>;
   /**
