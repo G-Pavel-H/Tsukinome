@@ -183,7 +183,7 @@ redirect happens in *your* browser, so no tunnel is needed. A public URL is only
 
 # Developing Tsukinome
 
-This repo is built by **Claude Code**, phase by phase, following `docs/implementation-plan.md`.
+This repo is developed by **Pavel Ghazaryan** and his best pal **Claude Code**, phase by phase, following `docs/implementation-plan.md`.
 
 - `docs/implementation-plan.md` — the full phased build plan.
 - `CLAUDE.md` — the working agreement and locked decisions (auto-loaded each session).

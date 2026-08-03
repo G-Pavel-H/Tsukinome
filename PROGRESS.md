@@ -115,13 +115,48 @@ removes the trigger; the gap in the gate itself remains.
 genuinely finished and CI-covered; the missing piece lived outside the repo — an E2B template with
 Python in it. The project's "complete = code + CI green, live verification gated" convention is
 fine for a detail we haven't observed (prompt-cache hits, say), but here it hid a headline
-capability that simply did not function. **`e2b.Dockerfile` now installs Python 3 + pip**
-(incl. `python-is-python3` — the pack invokes `python`, and Debian ships only `python3`), so the
-image is genuinely multi-toolchain. It still has to be **rebuilt and registered by hand**
-(`e2b template build`) before any Python repo works.
+capability that simply did not function.
+
+**Resolved 2026-08-02.** `e2b.Dockerfile` now installs Python 3 + pip on top of `node:22` —
+`python-is-python3` is load-bearing (the pack invokes `python`; Debian ships only `python3`), and
+`PIP_BREAK_SYSTEM_PACKAGES=1` is safe because the sandbox is an ephemeral microVM (PEP 668).
+Template **`tsukinome-sandbox`** is built and verified live: `node v22.23.1`, `git 2.39.5`,
+`Python 3.11.2`, `pip 23.0.1`. Set `E2B_TEMPLATE=tsukinome-sandbox`.
+
+**CLI note:** `e2b template build` is **gone**, not merely deprecated — it now ignores all options
+and exits 1 with a migration banner. Use **`e2b template create <name> --dockerfile e2b.Dockerfile`**,
+which still reads a Dockerfile directly (no SDK migration needed). `e2b template migrate` converts
+to the v2 SDK format, but note v2 defaults to a **non-root** user, which would break the
+`apt-get install` in this image — migration is not a no-op.
+
+**Watch the sandbox RAM.** `tsukinome-sandbox` was built at **1024 MiB**; the old
+`tsukinome-node22` had **2048 MiB**. The sandbox runs `npm ci` + full suites for arbitrary repos,
+so rebuild with `--memory-mb 2048` if installs start failing oddly.
 
 **Apply the same skepticism to the other code-complete-but-unproven phases:** 12b (BYO-key OAuth,
 never run live) and 15 (test-setup bootstrap, never run live).
+
+### 2026-08-02 — stale sweep retrying an unreachable installation forever
+
+**Symptom.** `Stale-run sweep failed for run {"runId":93,"err":"Not Found - …apps#create-an-installation-access-token-for-an-app"}`, repeating every hour.
+
+**Cause.** `postIssueComment` mints an installation token via `probot.auth(installationId)`. A 404
+there means the App cannot mint a token for that installation — it belongs to a **different App**
+(a run created under the old dev App, in a database the new production App now reads) or the App
+was uninstalled. A 404 on the comment itself (deleted issue/repo) is the same class.
+
+**Why it repeated forever.** In `sweepStaleRuns` the comment is posted *before* the state change,
+so the throw skipped both `updateRunState` and `markRunPinged`. The run stayed parked and un-pinged,
+so the next hourly sweep re-selected it and hit the identical 404 — permanently. Cheap, but the run
+could never be cleaned up. Same shape as the stranded-run bug: not loud, just permanent.
+
+**Fix.** `isNotFoundError` (`src/github/client.ts`) classifies a 404; the sweep's catch closes such
+a run as `Aborted` with no comment (there is nobody to notify, and that will not change). Transient
+errors are untouched — they still log and retry on the next sweep, so a 500 can never close a live
+run. Per-run isolation is unchanged, so one unreachable run still cannot stop the sweep.
+
+**Note:** `installation.deleted` purges the installation's stored key but does **not** close its
+open runs — deliberately left alone, since the sweep now cleans them up within its normal window.
 
 ## Locked decisions
 
@@ -635,6 +670,7 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-08-02 | Fix | ✅ Complete | 339 tests pass (24 gated-skipped), typecheck + lint clean. The stale sweep no longer retries an unreachable installation forever: a 404 from the installation-token mint (or a deleted issue/repo) now closes the run as `Aborted` instead of being re-selected every hour with the state change forever skipped. Transient errors still retry. Demo: `npx vitest run test/worker/stale.test.ts` — a 404 closes the run and a later sweep does not touch it, a 500 leaves it parked, and one unreachable run does not stop the sweep reaching the others.
 - 2026-08-01 | Fix | ✅ Complete | 335 tests pass (24 gated-skipped), typecheck + lint clean. Post-Phase-15 incident fix — see the Incident log. Toolchain resolution is now **manifest-first** (`getRepoRootFiles` → `detectToolchain` → `toolchainForLanguage`), a failed sandbox clone/install raises `SandboxSetupError` and is **terminal, not retried**, and a dead-lettered job now closes its run so nothing is stranded in a transient state. Demo: `npx vitest run test/worker/handle-produce-spec.test.ts test/worker/worker.test.ts` — an Angular repo whose primary language is Python resolves to TS/JS, a repo supported by manifest but not language is accepted, both signals empty still refuses, a sandbox setup failure refuses once with no retry, and a dead-letter leaves the run `failed`.
 - 2026-08-01 | Phase 15 | ✅ Complete (code + CI; live bootstrap run pending a host) | 328 tests pass (24 gated-skipped), typecheck + lint clean. Tsukinome now works on repos with **no test setup**: detect deterministically at plan time (`src/pipeline/test-setup.ts`), disclose + consent at the existing plan gate, then scaffold and **verify green before committing** it as its own commit (`src/pipeline/bootstrap.ts`), via a new optional `Toolchain.bootstrap` recipe (vitest for TS/JS, pytest for Python) and a narrow `CodeSandbox.runSetup`. No new run states or job types; repos that already have tests take no new path. Also relaxed `npm ci` → `npm ci || npm install` (it threw on a missing lockfile at sandbox open, before anything could recover). Demo: `npx vitest run test/toolchain/bootstrap.test.ts test/pipeline/test-setup.test.ts test/pipeline/bootstrap.test.ts test/worker/handle-implement.test.ts test/worker/handle-produce-plan.test.ts` — a bare repo gets a vitest/pytest setup committed before the feature work, a repo with tests is untouched, a not-green bootstrap commits nothing and stops gracefully, and a pack with no recipe refuses before the Opus plan call. Next: verify live on a zero-test TS repo and a zero-test Python repo (needs the multi-toolchain E2B image).
 - 2026-07-26 | Phase 14 | ✅ Complete (code + CI; gated index run + live memory envelope pending a host) | 286 tests pass (24 gated-skipped), typecheck + lint clean. Dropped PyTorch: the code-index sidecar now embeds the **same** MiniLM model (`all-MiniLM-L6-v2`, 384-dim) on ONNX Runtime via `fastembed` instead of `sentence-transformers`. torch (~2GB, ~1.5GB RAM) OOM'd small hosts; fastembed is ~177MB deps + ~90MB model and peaks ~300MB with `threads=1` + a small batch (both pinned in `sidecar/cocoindex_flow.py`). No dimension change, no migration, zero TS changes — the old Gemini-API plan was rejected (external dep/key/quotas for a best-effort component) and the plan doc's Phase 14 fully rewritten. Demo: `npx vitest run test/index/sidecar-backend.test.ts` (guards the fastembed swap + memory knobs); real `query-embed` on a live fastembed venv returns a 384-dim normalized vector. Next: run the gated `cocoindex.integration.test.ts` on a venv with `cocoindex`+`DATABASE_URL` and confirm the memory envelope on the deployed plan.

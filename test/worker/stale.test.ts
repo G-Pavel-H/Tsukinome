@@ -70,3 +70,78 @@ describe('sweepStaleRuns', () => {
     expect((await store.getRunById(fresh.id))!.state).toBe(RunState.AwaitingPlanApproval);
   });
 });
+
+describe('sweepStaleRuns — unreachable installation or issue', () => {
+  let clock: number;
+  let store: InMemoryStore;
+  beforeEach(() => {
+    clock = 1_000_000_000;
+    store = new InMemoryStore({ now: () => clock });
+  });
+
+  /** Octokit's shape for "the app cannot mint a token for this installation". */
+  const notFound = () =>
+    Object.assign(new Error('Not Found - https://docs.github.com/rest/reference/apps'), {
+      status: 404,
+    });
+
+  it('closes the run instead of retrying it hourly forever', async () => {
+    // The comment is posted *before* the state change, so a 404 used to leave the run
+    // un-pinged and un-closed — the sweeper then re-picked it every hour, permanently.
+    const github = fakeGitHub();
+    github.postIssueComment.mockRejectedValue(notFound());
+    const { run } = await store.findOrCreateRun(key, RunState.AwaitingPlanApproval);
+
+    clock += PING_AFTER_MS + 1;
+    await sweepStaleRuns({ store, github, log: silentLog }, clock);
+
+    expect((await store.getRunById(run.id))!.state).toBe(RunState.Aborted);
+
+    // Proof it is gone for good: a later sweep does not touch it again.
+    github.postIssueComment.mockClear();
+    clock += CLOSE_AFTER_MS;
+    await sweepStaleRuns({ store, github, log: silentLog }, clock);
+    expect(github.postIssueComment).not.toHaveBeenCalled();
+  });
+
+  it('closes it on the close path too, not just the ping path', async () => {
+    const github = fakeGitHub();
+    github.postIssueComment.mockRejectedValue(notFound());
+    const { run } = await store.findOrCreateRun(key, RunState.AwaitingPrReview);
+
+    clock += CLOSE_AFTER_MS + 1;
+    await sweepStaleRuns({ store, github, log: silentLog }, clock);
+
+    expect((await store.getRunById(run.id))!.state).toBe(RunState.Aborted);
+  });
+
+  it('leaves the run alone for a transient error, so it retries next sweep', async () => {
+    // A 500 or a network blip is not terminal — we must not close a live run over it.
+    const github = fakeGitHub();
+    github.postIssueComment.mockRejectedValue(Object.assign(new Error('Server Error'), { status: 500 }));
+    const { run } = await store.findOrCreateRun(key, RunState.AwaitingClarification);
+
+    clock += PING_AFTER_MS + 1;
+    await sweepStaleRuns({ store, github, log: silentLog }, clock);
+
+    expect((await store.getRunById(run.id))!.state).toBe(RunState.AwaitingClarification);
+  });
+
+  it('one unreachable run does not stop the sweep reaching the others', async () => {
+    const github = fakeGitHub();
+    github.postIssueComment
+      .mockRejectedValueOnce(notFound())
+      .mockResolvedValue(undefined);
+    const { run: bad } = await store.findOrCreateRun(key, RunState.AwaitingPlanApproval);
+    const { run: good } = await store.findOrCreateRun(
+      { ...key, issueNumber: 43 },
+      RunState.AwaitingPlanApproval,
+    );
+
+    clock += PING_AFTER_MS + 1;
+    await sweepStaleRuns({ store, github, log: silentLog }, clock);
+
+    expect((await store.getRunById(bad.id))!.state).toBe(RunState.Aborted);
+    expect((await store.getRunById(good.id))!.stalePingedAt).not.toBeNull();
+  });
+});
