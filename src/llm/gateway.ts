@@ -36,6 +36,7 @@ export interface GatewayCallParams {
   tools?: ToolSpec[];
   toolChoice?: ToolChoice;
   outputFormat?: unknown;
+  outputSchema?: Record<string, unknown>;
 }
 
 export interface GatewayCallResult {
@@ -93,6 +94,7 @@ export class LlmGateway {
       tools: params.tools,
       toolChoice: params.toolChoice,
       outputFormat: params.outputFormat,
+      outputSchema: params.outputSchema,
     });
 
     const cost = costNanoUsd(model, response.usage);

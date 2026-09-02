@@ -64,6 +64,12 @@ export interface LlmRequest {
   toolChoice?: ToolChoice;
   /** Opaque `output_config.format` object (e.g. from the SDK's zodOutputFormat). */
   outputFormat?: unknown;
+  /**
+   * The same constraint as `outputFormat`, as a plain JSON Schema (draft-07) — the form the
+   * Agent SDK takes. Both are derived from the role's Zod schema; providers read whichever
+   * their transport speaks, so neither has to understand the other's dialect.
+   */
+  outputSchema?: Record<string, unknown>;
 }
 
 export interface LlmResponse {
