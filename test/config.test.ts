@@ -23,6 +23,7 @@ describe('loadConfig', () => {
     delete process.env.PORT;
     delete process.env.RUN_BUDGET_USD;
     delete process.env.ALLOW_PLATFORM_KEY_FALLBACK;
+    delete process.env.ALLOW_SUBSCRIPTION_AUTH;
     delete process.env.GITHUB_CLIENT_ID;
     delete process.env.GITHUB_CLIENT_SECRET;
     delete process.env.SETUP_BASE_URL;
@@ -111,6 +112,16 @@ describe('loadConfig', () => {
     const config = loadConfig();
     expect(config.allowPlatformKeyFallback).toBe(true);
     expect(config.platformAnthropicKey).toBe('sk-ant-fake-key');
+  });
+
+  it('leaves subscription auth off unless ALLOW_SUBSCRIPTION_AUTH is explicitly set', () => {
+    Object.assign(process.env, validEnv);
+    expect(loadConfig().allowSubscriptionAuth).toBe(false);
+  });
+
+  it('parses ALLOW_SUBSCRIPTION_AUTH', () => {
+    Object.assign(process.env, validEnv, { ALLOW_SUBSCRIPTION_AUTH: '1' });
+    expect(loadConfig().allowSubscriptionAuth).toBe(true);
   });
 
   it('throws when fallback is enabled but no operator ANTHROPIC_API_KEY is set', () => {

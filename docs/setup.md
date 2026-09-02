@@ -65,6 +65,7 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 | `MASTER_ENCRYPTION_KEY` | yes | — | Base64, decodes to **32 bytes** (`openssl rand -base64 32`). Encrypts per-installation keys at rest (AES-256-GCM). |
 | `ANTHROPIC_API_KEY` | fallback only | — | Operator/platform key. **Optional** under BYO; required only when `ALLOW_PLATFORM_KEY_FALLBACK=true`. |
 | `ALLOW_PLATFORM_KEY_FALLBACK` | no | `false` | When `true`, installations with no key on file use the operator `ANTHROPIC_API_KEY` (self-host / dogfooding). Off → missing keys are refused, never billed to the operator. |
+| `ALLOW_SUBSCRIPTION_AUTH` | no | `false` | When `true`, an installation whose credential is labelled `subscription` runs against its own Claude plan via the Agent SDK. Off → those installations are refused, exactly as if they had no key. See below. |
 | `GITHUB_CLIENT_ID` | setup page | — | GitHub App OAuth client id (enables the setup page). |
 | `GITHUB_CLIENT_SECRET` | setup page | — | GitHub App OAuth client secret. |
 | `SETUP_BASE_URL` | setup page | — | Public origin (no trailing slash), e.g. `https://tsk.example.com`. Used for OAuth redirects + setup links. |
@@ -94,6 +95,38 @@ supply keys:
   `ALLOW_PLATFORM_KEY_FALLBACK=true`, and provide the operator `ANTHROPIC_API_KEY`. Every installation
   then uses that one key — the pre-Phase-12 behaviour. With the page unset and fallback off, `/setup`
   renders a "not configured" notice and runs without a key are refused.
+
+### Subscription auth (experimental, Phase 2.1)
+
+An installation can bill its runs to a **Claude Pro/Max subscription** instead of a pay-as-you-go
+API key. The credential is stored and encrypted exactly like an API key, with a `subscription`
+label that routes the run through the Claude Agent SDK rather than the Messages API.
+
+**This is off by default and needs Anthropic's prior approval before you offer it to other
+people's installations.** The Agent SDK docs state that, unless previously approved, third-party
+developers may not offer claude.ai login or rate limits for their products. Using your *own*
+subscription for your *own* installations is a different thing, and is what the flag is for today.
+
+To set it up:
+
+1. Run `claude setup-token` on a machine logged in to the Claude plan you want billed. It prints a
+   long-lived OAuth token.
+2. Store it against the installation:
+   `npm run debug:set-auth -- <installationId> subscription <token>`
+   (The setup page only writes API keys; it grows a second path once the approval question is
+   settled.)
+3. Set `ALLOW_SUBSCRIPTION_AUTH=1` and restart.
+
+Two things behave differently on this path:
+
+- **Cost figures become notional.** A subscription draws on rate-limit windows, not dollars, but
+  Tsukinome keeps pricing the reported tokens at list rates so `RUN_BUDGET_USD`, the per-run budget
+  stop and the PR cost summary all keep working — and stay comparable with API-key runs.
+- **Rate-limit exhaustion replaces budget exhaustion.** When the plan has no capacity left, the run
+  stops gracefully with a comment saying when the limit resets, rather than retrying into the wall.
+
+`ALLOW_SUBSCRIPTION_AUTH=0` is the kill-switch: every installation goes back to the API-key path
+immediately, with no data migration.
 
 ### Sandbox Node version (build the E2B template)
 

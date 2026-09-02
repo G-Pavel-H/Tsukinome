@@ -8,6 +8,7 @@ import { PgStore } from './store/pg-store.js';
 import { createProbotGitHubClient } from './github/client.js';
 import { E2BSandboxProvider } from './sandbox/e2b-sandbox.js';
 import { AnthropicProvider } from './llm/anthropic-provider.js';
+import { AgentSdkProvider } from './llm/agent-sdk-provider.js';
 import { LlmGateway } from './llm/gateway.js';
 import { buildProviderResolver } from './llm/provider-resolver.js';
 import { CredentialVault } from './secrets/credential-vault.js';
@@ -46,7 +47,10 @@ async function main() {
   const vault = new CredentialVault(store, config.masterEncryptionKey);
   const resolveProvider = buildProviderResolver({
     vault,
+    store,
     factory: (apiKey) => new AnthropicProvider(apiKey),
+    subscriptionFactory: (token) => new AgentSdkProvider(token),
+    allowSubscriptionAuth: config.allowSubscriptionAuth,
     allowPlatformFallback: config.allowPlatformKeyFallback,
     platformKey: config.platformAnthropicKey,
   });

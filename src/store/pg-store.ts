@@ -22,6 +22,7 @@ import type {
   TestRun,
   UpdateTaskInput,
   UpsertInstallationCredentialInput,
+  InstallationAuthType,
 } from './types.js';
 import type { EncryptedSecret } from '../secrets/crypto.js';
 import { DEFAULT_JOB_LEASE_MS, computeBackoffMs } from '../worker/retry.js';
@@ -456,6 +457,26 @@ export class PgStore implements Store {
       iv: row.anthropic_key_iv as Buffer,
       authTag: row.anthropic_key_auth_tag as Buffer,
     };
+  }
+
+  async getInstallationAuthType(installationId: number): Promise<InstallationAuthType | null> {
+    const { rows } = await this.pool.query(
+      'SELECT auth_type FROM installation_credentials WHERE installation_id = $1',
+      [installationId],
+    );
+    return rows[0] ? (rows[0].auth_type as InstallationAuthType) : null;
+  }
+
+  async setInstallationAuthType(
+    installationId: number,
+    authType: InstallationAuthType,
+  ): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE installation_credentials SET auth_type = $2, updated_at = now()
+         WHERE installation_id = $1`,
+      [installationId, authType],
+    );
+    return (rowCount ?? 0) > 0;
   }
 
   async deleteInstallationCredential(installationId: number): Promise<void> {

@@ -4,6 +4,7 @@ import { RunState, type Job, type JobPayload, type Store } from '../store/types.
 import type { SandboxProvider } from '../sandbox/types.js';
 import type { LlmGateway } from '../llm/gateway.js';
 import { MissingInstallationKeyError } from '../llm/provider-resolver.js';
+import { SubscriptionRateLimitError } from '../llm/agent-sdk-provider.js';
 import type { CodeIndex } from '../index/types.js';
 import { SandboxSetupError, type OpenCodeSandboxFn } from '../sandbox/code-sandbox.js';
 import { MAX_JOB_ATTEMPTS, JOB_BACKOFF_BASE_MS, DEFAULT_JOB_LEASE_MS } from './retry.js';
@@ -138,6 +139,44 @@ async function refuseForMissingKey(
   }
 }
 
+function rateLimitComment(resetsAt?: Date): string {
+  const when = resetsAt
+    ? ` Your plan's limit resets at ${resetsAt.toISOString()}.`
+    : " Your plan's limit will reset on its usual schedule.";
+  return (
+    '⏳ **This installation\'s Claude plan has no capacity left right now.** I stopped before ' +
+    'making any further model calls, so nothing was half-finished and nothing was charged.' +
+    when +
+    ' Re-open or re-trigger this issue after that and I\'ll pick it straight back up.'
+  );
+}
+
+/**
+ * A spent subscription is terminal for *this* job, exactly like a missing key: the backoff
+ * window is far shorter than a plan's reset window, so retrying just burns attempts. Close the
+ * run cleanly and tell the human when to come back.
+ */
+async function refuseForRateLimit(
+  job: Job,
+  err: SubscriptionRateLimitError,
+  deps: WorkerDeps,
+): Promise<void> {
+  const coords = issueCoordsFromPayload(job.payload);
+  const run = await deps.store.getRun(coords);
+  if (run) await deps.store.updateRunState(run.id, RunState.Failed);
+  deps.log.warn(
+    { jobId: job.id, type: job.type, resetsAt: err.resetsAt?.toISOString() },
+    'Refused: subscription rate limit reached',
+  );
+  // Best-effort: a failure to comment must not crash the worker loop.
+  try {
+    await deps.github.postIssueComment({ ...coords, body: rateLimitComment(err.resetsAt) });
+  } catch (commentErr) {
+    const m = commentErr instanceof Error ? commentErr.message : String(commentErr);
+    deps.log.error({ jobId: job.id, err: m }, 'Failed to post rate-limit comment');
+  }
+}
+
 const sandboxSetupComment = (command: string, outputTail: string): string =>
   `🛑 **I couldn't prepare a working environment for this repo.** Setting up the sandbox failed, ` +
   `and that won't change on a retry — so I've stopped rather than keep trying.\n\n` +
@@ -187,6 +226,12 @@ export async function processNextJob(deps: WorkerDeps): Promise<boolean> {
     // A missing per-installation key is terminal, not retryable — refuse gracefully once.
     if (err instanceof MissingInstallationKeyError) {
       await refuseForMissingKey(job, err, deps);
+      await deps.store.markJobDone(job.id);
+      return true;
+    }
+    // A spent Claude plan is terminal for this job too — it resets on the plan's clock, not ours.
+    if (err instanceof SubscriptionRateLimitError) {
+      await refuseForRateLimit(job, err, deps);
       await deps.store.markJobDone(job.id);
       return true;
     }

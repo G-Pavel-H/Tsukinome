@@ -20,6 +20,14 @@ export interface Config {
    * silently billed to the operator.
    */
   allowPlatformKeyFallback: boolean;
+  /**
+   * Phase 2.1 feature flag. When true, an installation whose credential is labelled
+   * `subscription` runs through the Claude Agent SDK against its own Claude plan instead of the
+   * Messages API. Off by default — subscription-backed runs are experimental and, for third-party
+   * installations, need Anthropic's prior approval. Turning it off is the kill-switch: every
+   * installation falls back to the API-key path with no data migration.
+   */
+  allowSubscriptionAuth: boolean;
   databaseUrl: string;
   e2bApiKey: string;
   /**
@@ -98,6 +106,7 @@ export function loadConfig(): Config {
     platformAnthropicKey,
     masterEncryptionKey: parseMasterKey(process.env.MASTER_ENCRYPTION_KEY!),
     allowPlatformKeyFallback,
+    allowSubscriptionAuth: parseBool(process.env.ALLOW_SUBSCRIPTION_AUTH),
     databaseUrl: process.env.DATABASE_URL!,
     e2bApiKey: process.env.E2B_API_KEY!,
     e2bTemplate: process.env.E2B_TEMPLATE?.trim() || undefined,
