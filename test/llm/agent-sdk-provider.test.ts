@@ -89,15 +89,25 @@ describe('AgentSdkProvider', () => {
     expect(calls[0].options.outputFormat).toEqual({ type: 'json_schema', schema });
   });
 
-  it('runs the harness sealed shut: no tools, no filesystem settings, one turn', async () => {
+  it('runs the harness sealed shut: no tools, no filesystem settings', async () => {
     // The safety invariant is load-bearing here — issue text reaches this prompt as data, and
-    // an agent holding Bash or Edit would turn that data into commands.
+    // an agent holding Bash or Edit would turn that data into commands. Turn count is not part
+    // of it: with an empty tool list there is nothing extra turns could reach.
     const { provider, calls } = providerWith([successResult()]);
     await provider.createMessage(baseRequest);
     expect(calls[0].options.allowedTools).toEqual([]);
     expect(calls[0].options.settingSources).toEqual([]);
-    expect(calls[0].options.maxTurns).toBe(1);
     expect(calls[0].options.permissionMode).toBe('default');
+  });
+
+  it('leaves the SDK room to retry structured output, but keeps it bounded', async () => {
+    // A cap of 1 gave the SDK no turn in which to re-prompt after a schema mismatch, which failed
+    // the roles with the largest schemas outright ("Reached maximum number of turns (1)").
+    const { provider, calls } = providerWith([successResult()]);
+    await provider.createMessage(baseRequest);
+    const maxTurns = calls[0].options.maxTurns as number;
+    expect(maxTurns).toBeGreaterThan(1);
+    expect(maxTurns).toBeLessThanOrEqual(8);
   });
 
   it('authenticates with the installation token without leaking the ambient environment', async () => {

@@ -21,6 +21,9 @@ export class SubscriptionRateLimitError extends Error {
   }
 }
 
+/** Turns allowed per call: one to answer, the rest for the SDK's schema-conformance retries. */
+const MAX_TURNS = 4;
+
 const EMPTY_USAGE: Usage = {
   inputTokens: 0,
   outputTokens: 0,
@@ -130,11 +133,16 @@ export class AgentSdkProvider implements LlmProvider {
       ...(req.outputSchema ? { outputFormat: { type: 'json_schema', schema: req.outputSchema } } : {}),
       // Sealed shut. Issue bodies and comments reach this prompt as data; a harness holding Bash
       // or Edit would turn that data into commands, and repo settings could rewrite the role's
-      // instructions. One turn, no tools, no filesystem config — this is the safety invariant.
+      // instructions. No tools, no filesystem config — that, not the turn count, is the safety
+      // invariant: with an empty tool list there is nothing extra turns could reach.
       allowedTools: [],
       settingSources: [],
       permissionMode: 'default',
-      maxTurns: 1,
+      // The SDK re-prompts itself when structured output doesn't satisfy the schema, and each
+      // attempt costs a turn. A cap of 1 left no room for that and failed the roles with the
+      // largest schemas (architect, test-author) outright. Bounded, not unbounded — the run
+      // budget in the gateway is the real cost ceiling.
+      maxTurns: MAX_TURNS,
       // Only the installation's own credential — never the operator's ambient environment.
       env: { CLAUDE_CODE_OAUTH_TOKEN: this.oauthToken },
     } as Options;
