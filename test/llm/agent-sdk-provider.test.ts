@@ -25,13 +25,22 @@ function successResult(over: Record<string, unknown> = {}) {
   };
 }
 
-/** Build a provider whose SDK calls are recorded and answered from `messages`. */
-function providerWith(messages: unknown[]) {
+/**
+ * Build a provider whose SDK calls are recorded and answered from `messages`.
+ *
+ * The real SDK yields an error result and *then* throws out of the iterator, so the fake does
+ * too — an earlier version of this fake only yielded, which hid a bug where the throw escaped
+ * before the provider could classify it.
+ */
+function providerWith(messages: unknown[], opts: { throwAfter?: boolean } = {}) {
   const calls: Array<{ prompt: string; options: Record<string, unknown> }> = [];
   const runQuery = ((args: { prompt: string; options: Record<string, unknown> }) => {
     calls.push(args);
     return (async function* () {
       for (const m of messages) yield m;
+      if (opts.throwAfter) {
+        throw new Error('Claude Code returned an error result: something went wrong');
+      }
     })();
   }) as unknown as AgentQuery;
   return { provider: new AgentSdkProvider('sk-ant-oat-test', runQuery), calls };
@@ -76,7 +85,7 @@ describe('AgentSdkProvider', () => {
   });
 
   it('passes the requested model, the joined system prompt, and the schema to the SDK', async () => {
-    const { provider, calls } = providerWith([successResult()]);
+    const { provider, calls } = providerWith([successResult({ structured_output: {} })]);
     const schema = { type: 'object', properties: {} };
     await provider.createMessage({ ...baseRequest, outputSchema: schema });
     expect(calls).toHaveLength(1);
@@ -120,10 +129,13 @@ describe('AgentSdkProvider', () => {
 
   it('raises SubscriptionRateLimitError when the plan rejects the call', async () => {
     const resetsAt = Math.floor(Date.now() / 1000) + 3600;
-    const { provider } = providerWith([
-      { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt } },
-      { type: 'result', subtype: 'error_during_execution', modelUsage: {} },
-    ]);
+    const { provider } = providerWith(
+      [
+        { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt } },
+        { type: 'result', subtype: 'error_during_execution', modelUsage: {} },
+      ],
+      { throwAfter: true },
+    );
     const err = await provider.createMessage(baseRequest).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(SubscriptionRateLimitError);
     expect((err as SubscriptionRateLimitError).resetsAt?.getTime()).toBe(resetsAt * 1000);
@@ -140,13 +152,60 @@ describe('AgentSdkProvider', () => {
   });
 
   it('surfaces other failures as ordinary errors so the job retries', async () => {
-    const { provider } = providerWith([
-      { type: 'result', subtype: 'error_max_structured_output_retries', modelUsage: {} },
-    ]);
+    const { provider } = providerWith(
+      [{ type: 'result', subtype: 'error_max_structured_output_retries', modelUsage: {} }],
+      { throwAfter: true },
+    );
     const err = await provider.createMessage(baseRequest).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(SubscriptionRateLimitError);
     expect((err as Error).message).toContain('error_max_structured_output_retries');
+  });
+
+  it('reports why a call failed — subtype, turns burned, and what the model last said', async () => {
+    // Without this the log said only "Reached maximum number of turns", which named the symptom
+    // and hid every input needed to diagnose it.
+    const { provider } = providerWith(
+      [
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'Let me plan that.' }] } },
+        {
+          type: 'result',
+          subtype: 'error_max_turns',
+          num_turns: 4,
+          stop_reason: 'max_turns',
+          errors: [{ code: 'schema_mismatch' }],
+          modelUsage: {},
+        },
+      ],
+      { throwAfter: true },
+    );
+    const err = (await provider.createMessage(baseRequest).catch((e: unknown) => e)) as Error;
+    expect(err.message).toContain('error_max_turns');
+    expect(err.message).toContain('turns=4');
+    expect(err.message).toContain('schema_mismatch');
+    expect(err.message).toContain('Let me plan that.');
+  });
+
+  it('still recognises an exhausted plan when the SDK throws on its way out', async () => {
+    const { provider } = providerWith(
+      [
+        { type: 'rate_limit_event', rate_limit_info: { status: 'rejected' } },
+        { type: 'result', subtype: 'error_during_execution', modelUsage: {} },
+      ],
+      { throwAfter: true },
+    );
+    await expect(provider.createMessage(baseRequest)).rejects.toBeInstanceOf(
+      SubscriptionRateLimitError,
+    );
+  });
+
+  it('treats a success that produced no structured output as a failure', async () => {
+    // The runner is about to JSON.parse this; free-form prose would fail there far less legibly.
+    const { provider } = providerWith([successResult({ result: 'here is my plan, in prose' })]);
+    const err = (await provider
+      .createMessage({ ...baseRequest, outputSchema: { type: 'object' } })
+      .catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/no structured output/i);
   });
 
   it('refuses request shapes it cannot faithfully represent, rather than silently dropping them', async () => {
