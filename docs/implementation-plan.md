@@ -544,82 +544,14 @@ Add the Python pack (pip/pytest, its test conventions + source extensions + sand
 - **Make it visible and consented.** Choosing a test framework for someone is opinionated, so surface it: record "this repo had no tests; Tsukinome added a `<runner>` setup" as an explicit assumption in the spec and in the PR body (audit trail), and consider routing it through the existing **plan-approval gate** so the human okays the framework choice before code is written.
 - **Bounded, idempotent, graceful.** Bootstrap at most once per run; skip entirely when a test setup already exists (repos with tests are completely unaffected); and if the resolved language pack has no bootstrap recipe, fall back to today's clear refusal with a specific reason ("no tests found and no scaffolding recipe for `<language>`") rather than failing mid-run.
 
-**Rough exit criteria:** a TS/JS or Python repo with **zero tests** goes issue → (detect: no test setup) → **bootstrap a minimal runner + one green example test, committed as a distinct step** → the normal test-first loop then implements the requested change red→green on top of that baseline → the PR contains both the test-setup bootstrap and the feature work, with the "no tests existed; added setup" decision recorded in the spec/PR; a repo that **already** has tests is untouched (no bootstrap path taken); a supported language with **no** bootstrap recipe degrades gracefully with a clear reason. TS/JS and Python paths both covered (mirror the Phase 13 per-language delivery split if it's cleaner as two PRs).
-
-#### What was actually built (2026-08-01)
-
-Delivered as **one PR covering both languages** — the detection gate, the sandbox seam, the
-verify-then-commit step and the consent plumbing are all shared, so a per-language split would have
-put ~90% of the work in the first PR and delayed end-to-end verification. Three insertion points,
-**no new run states and no new job types**:
-
-1. **Detect at plan time** — inside `retrieveCodeContext` (`src/worker/handlers.ts`), which already
-   has a host checkout. `src/pipeline/test-setup.ts` classifies into `none` / `full` / `runner-only`.
-2. **Consent at the existing plan gate** — the verdict is disclosed in `plan.md` and the gate
-   comment, and `/approve` covers it. Persisted as `context.bootstrap`.
-3. **Execute at implement time** — `handleImplement` runs `src/pipeline/bootstrap.ts` before the
-   task loop and commits via the existing `commitTaskFiles`.
-
-Decisions that differ from the sketch above:
-
-- **Fully deterministic — no scaffolding agent.** The recipe is a fixed handful of files per
-  language with no variance worth a model call, and the green gate makes correctness checkable.
-  Zero tokens, zero flakiness, directly unit-testable.
-- **Verified before committed.** Write config + example test → install the runner → run the suite →
-  commit **only if green**. A runner config that doesn't collect tests would make the loop's first
-  red unfixable (the implementer may not edit tests) — the 2026-07-13 false-red failure mode.
-- **Recorded in `plan.md` + the plan gate comment + the PR body, not the spec.** Detection happens
-  at plan time, *after* the spec artifact is committed, so recording it in the spec would mean
-  rewriting it. The plan is also where consent lives, so the two stay together.
-- **`hasTestRunner` is a per-pack predicate, not a file-existence check.** `pyproject.toml` is in
-  Python's `testConfigFiles` and exists in nearly every Python repo; npm writes a placeholder
-  `test` script that only ever exits 1. Both had to be excluded explicitly.
-- **`runner-only` never authors or edits the repo's tests.** If their existing tests don't pass
-  under the new runner, we refuse rather than "fix" them.
-- **Adjacent fix:** `TYPESCRIPT_JAVASCRIPT.installCmd` is now `npm ci || npm install`. `npm ci`
-  throws on a missing/stale lockfile at sandbox *open* — before any bootstrap could help — and
-  Python's pack was already tolerant (`|| true`).
-
-
----
-
-## 8. Post-launch backlog (v2)
-
-> Deliberately **after** the public launch. Not required to ship. These are version-2 upgrades — revisit once the product is live and has real usage.
-
-### Phase 2.1 — Subscription authentication (bring your Claude Pro/Max plan, alongside BYO API key)
-
-**The problem we're solving:** BYO API key (Phase 12) means every installation pays **pay-as-you-go API dollars** — a second, metered bill on top of the Claude subscription many of our users already have. That's a real adoption and cost barrier: a developer already paying for Claude Pro/Max would rather have Tsukinome draw from the plan they're already buying than rack up separate Console spend. Add **subscription-based authentication as a second option that lives *alongside* the existing API-key path**, so an installation can choose, at setup, to bill its runs to a user's Claude Pro/Max plan instead of an API key. This is explicitly *additive* — the API-key path stays the default and the backbone.
-
-**⛔ Policy gate — read before building (checked 2026-09-02).** The Claude Agent SDK docs (both the overview and the quickstart) carry this note verbatim: *"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods described in the Quickstart instead."* The quickstart's auth section documents **only** `ANTHROPIC_API_KEY` plus the cloud-provider variants (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`) — there is **no documented subscription/OAuth env var for the SDK**; `CLAUDE_CODE_OAUTH_TOKEN` / `claude setup-token` is a Claude Code CI mechanism we would be relying on undocumented. Consequences we accept and design to:
-- **API key stays the default and the shipping path.** Subscription auth is built behind a feature flag, defaulting off.
-- **Offering it to third-party installations requires prior Anthropic approval.** Until we have it, the flag is for **operator self-use only** (Pavel's own installations, own subscription) — a person using their own account through their own automation, which is not what the restriction names.
-- **Build the kill-switch first, not last.** One flag flip must return every installation to the API-key path with no data migration.
-
-**Why it's a restructure, not a drop-in (context):** Tsukinome authenticates to Anthropic with an **API key against the raw Messages API** (`AnthropicProvider` → `createMessage`, model-tiered Haiku/Sonnet/Opus). A Claude **subscription cannot drive the raw Messages API** — it only works through the Claude Agent SDK / Claude Code runtime. So supporting it means a **second `LlmProvider` implementation** that routes model calls through the Agent SDK, selected per-installation behind the existing `ProviderResolver` seam (Phase 12a). The gateway, agent runner, cost logging, budget and caching all sit *above* the provider seam.
-
-**How big the change actually is (measured against the code, 2026-09-02):** smaller than this section originally assumed. Three facts settle it:
-- **Every production role is single-shot, tool-free, and schema-constrained.** `src/agents/registry.ts` — only the two throwaway Phase-3 demo roles (`example-tool-pinger`) use the tool-use loop; every real role declares a zod `schema` and no `tools`. So "does the tool-use loop survive the SDK path?" is **not a bottleneck** — there is no production tool loop to preserve.
-- **Every call site sends exactly one user message with string content** (`src/worker/handlers.ts`, `src/pipeline/tdd.ts`). No multi-turn history to replay through a harness that owns its own conversation state.
-- **The Agent SDK TypeScript `Options` supports what we need**: `outputFormat?: { type: 'json_schema'; schema }`, `model`, `systemPrompt`, `effort`. The structured-output contract our roles depend on carries over.
-
-Net: **one new file behind the existing interface** — `src/llm/agent-sdk-provider.ts`, which calls `query({ prompt, options: { model, systemPrompt, outputFormat, maxTurns: 1 } })`, drains the async iterator to the `result` message, and maps its usage back into our `LlmResponse`. Nothing above the seam moves.
-
-**Ideas for the solution (to refine — not final technical decisions):**
-- **Dual credential model.** Extend the per-installation vault to store *either* an encrypted API key *or* a subscription OAuth token, with an explicit auth-type discriminator on the installation. `buildProviderResolver` branches on it to construct the right provider per run. Same encrypt-at-rest / never-log / redact / purge-on-uninstall invariants either way.
-- **A second provider behind the same interface.** Keep `LlmProvider` untouched. Everything above the seam (gateway instrumentation, per-run budget, role runner) is reused unchanged.
-- **Cost stays notional, and that is the simplest correct answer.** A subscription draws on rate-limit windows, not dollars — but keep `pricing.ts` computing list-price cost from the SDK-reported token counts and keep `RUN_BUDGET_USD` as a guard rail. Zero changes above the seam, and `llm_calls` rows stay comparable across both auth types (which is exactly the data the Opus-tier cost decision needs).
-- **Rate-limit exhaustion is the parallel of budget exhaustion.** One new error class mirroring `BudgetExhaustedError`, one worker branch, one graceful "your Claude plan hit its limit — try again after it resets" comment. Not a crash, not a dead-lettered job.
-- **Setup page gains a second path.** The Phase 12b OAuth surface offers "paste an API key" *or* "connect a Claude subscription", validated, encrypted and stored the same way, re-visitable to rotate, purged on uninstall. Ship this **last** — it is the surface the policy gate covers.
-- **Stay strictly on the sanctioned path.** Route only through the official Agent SDK. **Never** extract the raw OAuth token to hit the Messages API directly or via a translating proxy — that is the ToS-violating pattern that gets accounts flagged.
-
-**Known losses, all acceptable given single-shot roles:** no per-call `max_tokens` (roles currently set one), no hand-placed prompt-cache breakpoints (the SDK caches its own prefix rather than honouring our `cacheControl` blocks), and higher per-call latency because the SDK spawns its bundled native Claude Code binary per query.
-
-**Deployment risk — memory.** That bundled binary is a spawned subprocess per model call, on a host where the CocoIndex sidecar already spikes ~300MB against a 512MB Render Starter. Measure the envelope before enabling the flag in production; a plan bump may be the real prerequisite.
-
-**Risk to carry — policy volatility (load-bearing):** Anthropic's stance on subscription-backed programmatic and third-party usage changed **three times in 2026** (Feb: banned OAuth in third-party apps → May: announced a separate monthly Agent SDK credit that *would* cover third-party Agent-SDK apps → June 15: paused that change), and as of 2026-09-02 the documented position is the flat restriction quoted above. Treat this whole path as **experimental, behind a feature flag**, re-verify the terms at build time, and keep BYO API key the default.
-
-**Rough exit criteria:** an installation can be configured to authenticate with a Claude Pro/Max subscription **instead of** an API key, and a run then draws its model usage from that subscription **through the Agent SDK**, while the API-key path is byte-for-byte unchanged and remains the default; the auth type + credential are stored encrypted per installation and purged on uninstall; rate-limit exhaustion is surfaced gracefully rather than crashing a run; the feature is gated behind a flag with a one-flip kill-switch back to API keys, and documented with its ToS caveat.
+**Exit criteria — met.** An installation can authenticate with a Claude Pro/Max subscription
+instead of an API key, chosen on the connect page; a run then draws its model usage from that
+subscription through the Agent SDK, while the API-key path is byte-for-byte unchanged and remains
+the pay-as-you-go alternative; the auth type + credential are stored encrypted per installation and
+purged on uninstall; rate-limit exhaustion is surfaced gracefully rather than crashing a run; and
+the feature is gated behind a flag with a one-flip kill-switch back to API keys, documented with
+its policy caveat. **Still to verify live:** an end-to-end issue → PR run billed to a subscription,
+and the memory envelope on Render.
 
 **Open questions (narrowed):** does **prompt caching** still pay off through the SDK path, given we lose our own breakpoints (measure `cache_read` equivalents, if the SDK reports them); how to **capture and refresh** a subscription token for a hosted service (interactive OAuth vs a pasted `setup-token`, and its expiry/rotation); do **Team/Enterprise** subscriptions behave differently from Pro/Max; how to gate **model tiers** against plan tier (Opus needs Max); and what the memory envelope actually is on Render with a spawned binary per call.
 
