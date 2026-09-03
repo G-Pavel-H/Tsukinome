@@ -104,6 +104,9 @@ describe('AgentSdkProvider', () => {
     // of it: with an empty tool list there is nothing extra turns could reach.
     const { provider, calls } = providerWith([successResult()]);
     await provider.createMessage(baseRequest);
+    // `tools` is the option that removes the built-in toolset; `allowedTools` only controls
+    // auto-approval, so asserting on it alone let a fully-armed harness pass this test.
+    expect(calls[0].options.tools).toEqual([]);
     expect(calls[0].options.allowedTools).toEqual([]);
     expect(calls[0].options.settingSources).toEqual([]);
     expect(calls[0].options.permissionMode).toBe('default');
@@ -119,12 +122,21 @@ describe('AgentSdkProvider', () => {
     expect(maxTurns).toBeLessThanOrEqual(8);
   });
 
-  it('authenticates with the installation token without leaking the ambient environment', async () => {
-    const { provider, calls } = providerWith([successResult()]);
-    await provider.createMessage(baseRequest);
-    const env = calls[0].options.env as Record<string, string | undefined>;
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat-test');
-    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  it('passes the installation token through, and clears any credential that would outrank it', async () => {
+    // `env` replaces rather than merges, so the inherited environment has to be forwarded — but
+    // an operator API key surviving in it would silently bill the operator, not the installation.
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-operator-key';
+    try {
+      const { provider, calls } = providerWith([successResult()]);
+      await provider.createMessage(baseRequest);
+      const env = calls[0].options.env as Record<string, string | undefined>;
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat-test');
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+      expect(env.PATH).toBe(process.env.PATH); // the binary still needs its environment
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+    }
   });
 
   it('raises SubscriptionRateLimitError when the plan rejects the call', async () => {

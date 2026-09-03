@@ -211,8 +211,13 @@ export class AgentSdkProvider implements LlmProvider {
       ...(req.outputSchema ? { outputFormat: { type: 'json_schema', schema: req.outputSchema } } : {}),
       // Sealed shut. Issue bodies and comments reach this prompt as data; a harness holding Bash
       // or Edit would turn that data into commands, and repo settings could rewrite the role's
-      // instructions. No tools, no filesystem config — that, not the turn count, is the safety
-      // invariant: with an empty tool list there is nothing extra turns could reach.
+      // instructions.
+      //
+      // `tools: []` is what actually removes the built-in toolset. `allowedTools: []` does NOT:
+      // per the SDK, that list only names tools auto-approved without prompting, so the tools
+      // stayed in the model's context. The architect then spent every turn trying to call one
+      // (`stop_reason=tool_use`) and never delivered a plan.
+      tools: [],
       allowedTools: [],
       settingSources: [],
       permissionMode: 'default',
@@ -221,8 +226,17 @@ export class AgentSdkProvider implements LlmProvider {
       // largest schemas (architect, test-author) outright. Bounded, not unbounded — the run
       // budget in the gateway is the real cost ceiling.
       maxTurns: MAX_TURNS,
-      // Only the installation's own credential — never the operator's ambient environment.
-      env: { CLAUDE_CODE_OAUTH_TOKEN: this.oauthToken },
+      // `env` REPLACES the subprocess environment rather than merging, so the inherited vars the
+      // binary needs (PATH, HOME, proxy and CA settings) have to be passed through explicitly.
+      // The two Anthropic credentials are then cleared: both outrank an OAuth token in the CLI's
+      // resolution order, so an operator key left in the environment would silently bill the
+      // operator instead of the installation's own subscription.
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: undefined,
+        ANTHROPIC_AUTH_TOKEN: undefined,
+        CLAUDE_CODE_OAUTH_TOKEN: this.oauthToken,
+      },
     } as Options;
   }
 }

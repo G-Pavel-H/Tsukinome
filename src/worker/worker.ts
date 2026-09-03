@@ -35,6 +35,7 @@ export interface WorkerDeps {
   log: Logger;
   /** Optional per-run budget ceiling (nano-USD); defaults to the DB column default if unset. */
   runBudgetNanoUsd?: number;
+  subscriptionRunBudgetNanoUsd?: number;
   /** Public base URL of the deployment (Phase 12b); used to link the setup page in refusals. */
   setupBaseUrl?: string;
 }

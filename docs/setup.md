@@ -74,6 +74,7 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 | `DATABASE_URL` | yes | — | Postgres connection string (pgvector-capable). |
 | `COCOINDEX_PYTHON` | optional | `python3` | Path to the venv interpreter that has the code-index sidecar deps (see below). Unset → bare `python3`; if that lacks the deps, plan-time code retrieval degrades gracefully. |
 | `RUN_BUDGET_USD` | no | `1.00` | Per-run model-spend ceiling. |
+| `SUBSCRIPTION_RUN_BUDGET_USD` | no | `25.00` | Per-run ceiling for installations billing to a Claude subscription. Their usage is metered in rate-limit windows, not dollars, so this is a runaway guard rather than a spend cap — a tight figure would stop healthy runs while protecting nothing. |
 | `PORT` | no | `3000` | Webhook HTTP port. |
 
 > This environment's permission settings block editing `.env*` from the agent, so there is no
