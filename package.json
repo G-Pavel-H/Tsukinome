@@ -19,7 +19,8 @@
     "debug:run-tests": "tsx scripts/debug-run-tests.ts",
     "debug:index-repo": "tsx scripts/debug-index-repo.ts",
     "debug:cost-metrics": "tsx scripts/debug-cost-metrics.ts",
-    "debug:set-auth": "tsx scripts/debug-set-auth.ts"
+    "debug:set-auth": "tsx scripts/debug-set-auth.ts",
+    "debug:check-token": "tsx scripts/debug-check-token.ts"
   },
   "license": "Apache-2.0",
   "dependencies": {

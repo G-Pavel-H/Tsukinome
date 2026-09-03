@@ -10,16 +10,22 @@ export type SubscriptionTokenValidator = (token: string) => Promise<boolean>;
  * which is the price of not storing a credential that fails on their first issue.
  */
 export const subscriptionTokenValidator: SubscriptionTokenValidator = async (token) => {
-  try {
-    const provider = new AgentSdkProvider(token);
-    await provider.createMessage({
-      model: 'claude-haiku-4-5',
-      system: [{ text: 'Reply with the single word: ok' }],
-      messages: [{ role: 'user', content: 'ok' }],
-      maxTokens: 16,
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  await probeSubscriptionToken(token);
+  return true;
 };
+
+/**
+ * The same check, but it throws the underlying error instead of collapsing it to a boolean.
+ * A rejected token and a broken environment are very different problems, and the form can only
+ * say "that didn't work" — so callers that can surface detail (the server log, `debug:check-token`)
+ * use this and report what actually came back.
+ */
+export async function probeSubscriptionToken(token: string): Promise<void> {
+  const provider = new AgentSdkProvider(token);
+  await provider.createMessage({
+    model: 'claude-haiku-4-5',
+    system: [{ text: 'Reply with the single word: ok' }],
+    messages: [{ role: 'user', content: 'ok' }],
+    maxTokens: 16,
+  });
+}

@@ -106,6 +106,14 @@ export async function handleCallback(
   };
 }
 
+function credentialRejected(authType: InstallationAuthType): string {
+  return authType === 'subscription'
+    ? "Anthropic didn't accept that token. Check you copied the whole line from " +
+        '`claude setup-token` (it starts sk-ant-oat), and that the plan it belongs to is active. ' +
+        'The host operator can see the exact reason in the server log.'
+    : 'Anthropic rejected that key. Check it and try again.';
+}
+
 /**
  * `POST /setup/key` — store (or rotate) the installation's credential. Re-checks ownership
  * against the session (never a hidden field alone), validates the credential against the path it
@@ -161,15 +169,17 @@ export async function handleKeySubmit(
   try {
     valid = await validate(secret);
   } catch (err) {
-    deps.log.error({ err: err instanceof Error ? err.message : String(err), authType }, 'Credential validation errored');
-    return html(502, renderCredentialForm(installationId, "Couldn't reach Anthropic to check that. Please try again."));
+    // Log the cause: "rejected" and "couldn't run the check" look identical to the user, and
+    // only one of them is their problem to fix.
+    deps.log.error(
+      { err: err instanceof Error ? err.message : String(err), authType, installationId },
+      'Credential validation failed',
+    );
+    return html(400, renderCredentialForm(installationId, credentialRejected(authType)));
   }
   if (!valid) {
-    const rejected =
-      authType === 'subscription'
-        ? "Anthropic didn't accept that subscription token. Re-run `claude setup-token` and try again."
-        : 'Anthropic rejected that key. Check it and try again.';
-    return html(400, renderCredentialForm(installationId, rejected));
+    deps.log.warn({ authType, installationId }, 'Credential rejected by Anthropic');
+    return html(400, renderCredentialForm(installationId, credentialRejected(authType)));
   }
 
   await writeInstallationAuth(deps.vault, deps.store, installationId, authType, secret);
