@@ -14,6 +14,7 @@ import { buildProviderResolver } from './llm/provider-resolver.js';
 import { CredentialVault } from './secrets/credential-vault.js';
 import { HttpGitHubOAuthClient } from './github/oauth.js';
 import { anthropicKeyValidator } from './secrets/anthropic-validator.js';
+import { subscriptionTokenValidator } from './llm/subscription-validator.js';
 import { createSetupMiddleware, type SetupServerDeps } from './web/setup-server.js';
 import { PgVectorCodeIndex } from './index/pgvector-code-index.js';
 import { CocoIndexSidecarRunner, SidecarEmbeddingProvider } from './index/cocoindex-runner.js';
@@ -78,7 +79,10 @@ async function main() {
           clientSecret: config.githubClientSecret!,
         }),
         validateKey: anthropicKeyValidator,
+        validateSubscriptionToken: subscriptionTokenValidator,
+        allowSubscriptionAuth: config.allowSubscriptionAuth,
         vault,
+        store,
         config: {
           clientId: config.githubClientId!,
           clientSecret: config.githubClientSecret!,

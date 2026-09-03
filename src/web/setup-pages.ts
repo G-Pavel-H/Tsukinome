@@ -25,6 +25,10 @@ function page(title: string, inner: string): string {
   .muted { color: rgba(128,128,128,0.95); font-size: 0.9rem; }
   .error { color: #dc2626; font-weight: 600; }
   code { background: rgba(128,128,128,0.15); padding: 0.1rem 0.35rem; border-radius: 4px; }
+  fieldset.choice { border: 0; padding: 0; margin: 0; }
+  .option { font-weight: 400; margin: 1rem 0 0.25rem; display: flex; gap: 0.5rem; align-items: baseline; }
+  .option input { margin: 0; }
+  #sub, #key { padding-left: 1.5rem; }
 </style>
 </head>
 <body>
@@ -33,34 +37,67 @@ ${inner}
 </html>`;
 }
 
-export function renderKeyForm(installationId: number, error?: string): string {
+export function renderCredentialForm(installationId: number, error?: string): string {
   const errorLine = error ? `<p class="error">${error}</p>` : '';
   return page(
-    'Set your Anthropic key',
-    `<h1>Connect your Anthropic key</h1>
-<p class="muted">Tsukinome runs your issues through the Anthropic API using <strong>your</strong> key, so
-model usage is billed to you. Your key is encrypted at rest and never shown again.</p>
+    'Connect Tsukinome',
+    `<h1>Connect Tsukinome to Anthropic</h1>
+<p class="muted">Tsukinome runs your issues through Claude using <strong>your</strong> account, so model
+usage is billed to you. Whichever you choose is encrypted at rest and never shown again.</p>
 <div class="card">
   <form method="POST" action="/setup/key">
     ${errorLine}
     <input type="hidden" name="installation_id" value="${installationId}" />
-    <label for="api_key">Anthropic API key</label>
-    <input id="api_key" name="api_key" type="password" autocomplete="off"
-           placeholder="sk-ant-..." spellcheck="false" required />
+
+    <fieldset class="choice">
+      <label class="option">
+        <input type="radio" name="auth_type" value="subscription" checked
+               onchange="document.getElementById('sub').hidden=false;document.getElementById('key').hidden=true" />
+        <strong>My Claude subscription</strong> — Pro or Max
+      </label>
+      <div id="sub">
+        <p class="muted">Runs draw on your Claude plan's usage, with no separate API bill. On a machine
+        signed in to that plan, run <code>claude setup-token</code> and paste the token it prints.</p>
+        <label for="subscription_token">Claude subscription token</label>
+        <input id="subscription_token" name="subscription_token" type="password" autocomplete="off"
+               placeholder="sk-ant-oat..." spellcheck="false" />
+      </div>
+
+      <label class="option">
+        <input type="radio" name="auth_type" value="api_key"
+               onchange="document.getElementById('sub').hidden=true;document.getElementById('key').hidden=false" />
+        <strong>An Anthropic API key</strong> — pay as you go
+      </label>
+      <div id="key" hidden>
+        <p class="muted">Runs are billed to your Anthropic Console account per token.</p>
+        <label for="api_key">Anthropic API key</label>
+        <input id="api_key" name="api_key" type="password" autocomplete="off"
+               placeholder="sk-ant-..." spellcheck="false" />
+      </div>
+    </fieldset>
+
     <button type="submit">Validate &amp; save</button>
   </form>
 </div>
-<p class="muted">Installation <code>${installationId}</code>. Re-visit this page any time to rotate the key.</p>`,
+<p class="muted">Installation <code>${installationId}</code>. Re-visit this page any time to switch or rotate.</p>`,
   );
 }
 
-export function renderSuccessPage(installationId: number): string {
+export function renderSuccessPage(
+  installationId: number,
+  authType: 'api_key' | 'subscription',
+): string {
+  const what =
+    authType === 'subscription'
+      ? 'your Claude subscription'
+      : 'your Anthropic API key';
   return page(
-    'Key saved',
-    `<h1>✅ Your key is saved</h1>
+    'Connected',
+    `<h1>✅ You're connected</h1>
 <div class="card">
-  <p>Tsukinome will now use your Anthropic key for installation <code>${installationId}</code>.</p>
-  <p class="muted">Open an issue on a connected repo to start a run. Re-visit this page any time to rotate the key.</p>
+  <p>Tsukinome will bill runs for installation <code>${installationId}</code> to ${what}.</p>
+  <p class="muted">Open an issue on a connected repo to start a run. Re-visit this page any time to
+  switch method or rotate the credential.</p>
 </div>`,
   );
 }
