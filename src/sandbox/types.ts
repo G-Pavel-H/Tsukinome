@@ -15,6 +15,12 @@ export interface RunCommandOptions {
 export interface SandboxHandle {
   readonly id: string;
   runCommand(cmd: string, opts?: RunCommandOptions): Promise<CommandResult>;
+  /**
+   * Push the sandbox's death clock out to `timeoutMs` from now. The lifetime is a backstop
+   * against leaking sandboxes when we crash, so it has to be refreshed while work is genuinely
+   * in progress — otherwise it expires during the model calls between commands.
+   */
+  extendTimeout(timeoutMs: number): Promise<void>;
   /** Tear the sandbox down. Must be safe to call exactly once per handle. */
   kill(): Promise<void>;
 }
@@ -23,6 +29,8 @@ export interface CreateSandboxOptions {
   /** Max sandbox lifetime; the provider auto-kills past this as a teardown backstop. */
   timeoutMs?: number;
 }
+
+/** Per-command ceiling. Distinct from the sandbox's lifetime — see `SandboxHandle`. */
 
 /** Creates ephemeral sandboxes. Real impl is E2B; tests use a fake. */
 export interface SandboxProvider {

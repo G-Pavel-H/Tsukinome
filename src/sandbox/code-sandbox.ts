@@ -1,6 +1,12 @@
 import type { Logger } from '../log.js';
 import { DEFAULT_TOOLCHAIN, type Toolchain } from '../toolchain/toolchain.js';
-import type { SandboxHandle, SandboxProvider, TestRunResult } from './types.js';
+import type {
+  CommandResult,
+  RunCommandOptions,
+  SandboxHandle,
+  SandboxProvider,
+  TestRunResult,
+} from './types.js';
 
 /**
  * A persistent sandbox session for the TDD loop: clone + install once, then write
@@ -39,7 +45,10 @@ export interface OpenCodeSandboxInput {
 export interface OpenCodeSandboxDeps {
   sandboxProvider: SandboxProvider;
   log: Logger;
+  /** Ceiling for a single command. Default `DEFAULT_COMMAND_TIMEOUT_MS`. */
   timeoutMs?: number;
+  /** Sandbox lifetime, refreshed before each command. Default `DEFAULT_SESSION_TIMEOUT_MS`. */
+  sessionTimeoutMs?: number;
   /** Language pack driving the install/test commands. Defaults to TypeScript/JavaScript. */
   toolchain?: Toolchain;
 }
@@ -62,7 +71,15 @@ export class SandboxSetupError extends Error {
 
 const CLONE_DIR = 'repo';
 const OUTPUT_TAIL_CAP = 4000;
-export const DEFAULT_SESSION_TIMEOUT_MS = 5 * 60_000;
+/** Ceiling for a single command — long enough for `npm ci` or a full test suite. */
+export const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
+/**
+ * How long the sandbox outlives its last command. This is a leak backstop, not a work budget:
+ * it is refreshed before every command, so a session lives as long as work keeps happening and
+ * dies shortly after we stop (or crash). It must comfortably exceed the gap between commands —
+ * the TDD loop makes several model calls between them.
+ */
+export const DEFAULT_SESSION_TIMEOUT_MS = 30 * 60_000;
 
 function tail(...parts: string[]): string {
   const combined = parts.filter(Boolean).join('\n');
@@ -108,22 +125,32 @@ export async function openCodeSandbox(
   deps: OpenCodeSandboxDeps,
 ): Promise<CodeSandbox> {
   const { sandboxProvider } = deps;
-  const timeoutMs = deps.timeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const sessionTimeoutMs = deps.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
   const toolchain = deps.toolchain ?? DEFAULT_TOOLCHAIN;
   const { token, owner, repo, ref } = input;
 
   const cloneUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
-  const handle: SandboxHandle = await sandboxProvider.create({ timeoutMs });
+  const handle: SandboxHandle = await sandboxProvider.create({ timeoutMs: sessionTimeoutMs });
+
+  /**
+   * Every command goes through here so the death clock is pushed out first. Without it the
+   * sandbox expires mid-run while we sit in a model call between commands — which is exactly
+   * how a TDD loop dies at the fourth attempt with "connection to sandbox ended".
+   */
+  const run = async (cmd: string, opts: RunCommandOptions = {}): Promise<CommandResult> => {
+    await handle.extendTimeout(sessionTimeoutMs);
+    return handle.runCommand(cmd, { ...opts, timeoutMs: opts.timeoutMs ?? timeoutMs });
+  };
 
   try {
-    const clone = await handle.runCommand(
+    const clone = await run(
       `git clone ${cloneUrl} ${CLONE_DIR} && cd ${CLONE_DIR} && git checkout ${ref}`,
-      { timeoutMs },
     );
     if (clone.exitCode !== 0) {
       throw new SandboxSetupError('git clone', redact(clone.stderr || clone.stdout, token));
     }
-    const install = await handle.runCommand(toolchain.installCmd, { cwd: CLONE_DIR, timeoutMs });
+    const install = await run(toolchain.installCmd, { cwd: CLONE_DIR });
     if (install.exitCode !== 0) {
       throw new SandboxSetupError(toolchain.installCmd, tail(install.stdout, install.stderr));
     }
@@ -138,21 +165,21 @@ export async function openCodeSandbox(
         const b64 = Buffer.from(f.content, 'utf-8').toString('base64');
         const full = `${CLONE_DIR}/${f.path}`;
         const cmd = `mkdir -p "$(dirname '${full}')" && printf '%s' '${b64}' | base64 -d > '${full}'`;
-        const res = await handle.runCommand(cmd, { timeoutMs });
+        const res = await run(cmd);
         if (res.exitCode !== 0) throw new Error(`writeFile ${f.path} failed: ${res.stderr}`);
       }
     },
 
     async runTests() {
       const start = Date.now();
-      const res = await handle.runCommand(toolchain.testCmd, { cwd: CLONE_DIR, timeoutMs });
+      const res = await run(toolchain.testCmd, { cwd: CLONE_DIR });
       return classifyTestRun(res.exitCode, Date.now() - start, res.stdout, res.stderr, toolchain.testCmd);
     },
 
     async readFiles(paths) {
       const out: { path: string; content: string }[] = [];
       for (const p of paths) {
-        const res = await handle.runCommand(`base64 '${CLONE_DIR}/${p}'`, { timeoutMs });
+        const res = await run(`base64 '${CLONE_DIR}/${p}'`);
         if (res.exitCode !== 0) continue; // file does not exist yet — skip
         out.push({ path: p, content: Buffer.from(res.stdout.trim(), 'base64').toString('utf-8') });
       }
@@ -160,12 +187,12 @@ export async function openCodeSandbox(
     },
 
     async runSetup(command) {
-      const res = await handle.runCommand(command, { cwd: CLONE_DIR, timeoutMs });
+      const res = await run(command, { cwd: CLONE_DIR });
       return { exitCode: res.exitCode, outputTail: tail(res.stdout, res.stderr) };
     },
 
     async listFiles() {
-      const res = await handle.runCommand('git ls-files', { cwd: CLONE_DIR, timeoutMs });
+      const res = await run('git ls-files', { cwd: CLONE_DIR });
       if (res.exitCode !== 0) return [];
       return res.stdout
         .split('\n')

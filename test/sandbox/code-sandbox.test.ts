@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { openCodeSandbox, classifyTestRun } from '../../src/sandbox/code-sandbox.js';
+import {
+  openCodeSandbox,
+  classifyTestRun,
+  DEFAULT_SESSION_TIMEOUT_MS,
+  DEFAULT_COMMAND_TIMEOUT_MS,
+} from '../../src/sandbox/code-sandbox.js';
 import type { Toolchain } from '../../src/toolchain/toolchain.js';
 import { TYPESCRIPT_JAVASCRIPT } from '../../src/toolchain/toolchain.js';
 import { FakeSandboxProvider, type ScriptedCommand } from './fake-sandbox.js';
@@ -73,5 +78,38 @@ describe('openCodeSandbox', () => {
     expect(p.only.killed).toBe(1);
     const thrown = await openCodeSandbox(input, { sandboxProvider: provider([{ match: 'git clone', result: { exitCode: 1, stdout: '', stderr: input.token } }]), log: silentLog }).catch((e: Error) => e);
     expect((thrown as Error).message).not.toContain(input.token);
+  });
+
+  it('refreshes the sandbox lifetime before every command', async () => {
+    // The lifetime is a leak backstop, not a work budget. A TDD loop sits in model calls between
+    // commands, so a clock that only starts at creation expires mid-run — which is how a run dies
+    // with "the connection to sandbox … ended before the stream completed".
+    const provider = new FakeSandboxProvider();
+    const sandbox = await openCodeSandbox(
+      { token: 't', owner: 'acme', repo: 'widgets', ref: 'main' },
+      { sandboxProvider: provider },
+    );
+    const handle = provider.only;
+    const afterOpen = handle.timeoutExtensions.length;
+    expect(afterOpen).toBeGreaterThan(0);
+
+    await sandbox.runTests();
+    await sandbox.listFiles();
+    expect(handle.timeoutExtensions.length).toBe(afterOpen + 2);
+    // Every refresh pushes out by the full session window, not a dwindling remainder.
+    expect(new Set(handle.timeoutExtensions).size).toBe(1);
+    expect(handle.timeoutExtensions[0]).toBe(DEFAULT_SESSION_TIMEOUT_MS);
+  });
+
+  it('gives the sandbox a longer lifetime than any single command', async () => {
+    // One constant used to serve both, so a slow suite and a long session were the same number.
+    const provider = new FakeSandboxProvider();
+    await openCodeSandbox(
+      { token: 't', owner: 'acme', repo: 'widgets', ref: 'main' },
+      { sandboxProvider: provider },
+    );
+    expect(DEFAULT_SESSION_TIMEOUT_MS).toBeGreaterThan(DEFAULT_COMMAND_TIMEOUT_MS);
+    const cmd = provider.only.commands[0]!;
+    expect(cmd.opts?.timeoutMs).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
   });
 });
