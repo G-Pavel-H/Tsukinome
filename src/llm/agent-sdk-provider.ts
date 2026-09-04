@@ -242,16 +242,30 @@ export class AgentSdkProvider implements LlmProvider {
 }
 
 /**
- * Flatten the request to the one shape the harness takes. Every production role sends exactly
- * one user turn with no tools; anything else would have to be dropped or faked, so refuse loudly.
+ * Flatten the request to the one shape the harness takes: a single user turn of text.
+ *
+ * Content arrives either as a plain string or as text blocks — the TDD roles use blocks so a
+ * prompt-cache breakpoint can sit between the stable prefix and the volatile tail. The Agent SDK
+ * manages its own caching, so the breakpoint has nothing to attach to here and the blocks simply
+ * concatenate. Anything that isn't text (a tool call or result) genuinely cannot be represented,
+ * so that still refuses rather than silently dropping content.
  */
 function singleUserPrompt(req: LlmRequest): string {
   if (req.tools?.length) {
     throw new Error('AgentSdkProvider does not support tool-use roles');
   }
   const [message, ...rest] = req.messages;
-  if (!message || rest.length > 0 || typeof message.content !== 'string') {
-    throw new Error('AgentSdkProvider requires a single user message with string content');
+  if (!message || rest.length > 0 || message.role !== 'user') {
+    throw new Error('AgentSdkProvider requires a single user message');
   }
-  return message.content;
+  if (typeof message.content === 'string') return message.content;
+
+  const texts: string[] = [];
+  for (const block of message.content) {
+    if (block.type !== 'text') {
+      throw new Error(`AgentSdkProvider cannot represent a ${block.type} block in a prompt`);
+    }
+    texts.push(block.text);
+  }
+  return texts.join('\n\n');
 }

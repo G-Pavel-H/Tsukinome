@@ -220,6 +220,26 @@ describe('AgentSdkProvider', () => {
     expect(err.message).toMatch(/no structured output/i);
   });
 
+  it('flattens a block-content user turn, which is how the TDD roles cache their prompts', async () => {
+    // test-author / implementer / refactor split their prompt so a cache breakpoint can sit
+    // between the stable prefix and the volatile tail. The SDK does its own caching, so the
+    // blocks just concatenate — but they must not be rejected.
+    const { provider, calls } = providerWith([successResult()]);
+    await provider.createMessage({
+      ...baseRequest,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Stable prefix.', cacheControl: 'ephemeral' },
+            { type: 'text', text: 'Volatile tail.' },
+          ],
+        },
+      ],
+    });
+    expect(calls[0].prompt).toBe('Stable prefix.\n\nVolatile tail.');
+  });
+
   it('refuses request shapes it cannot faithfully represent, rather than silently dropping them', async () => {
     const { provider } = providerWith([successResult()]);
     await expect(
@@ -237,5 +257,17 @@ describe('AgentSdkProvider', () => {
         tools: [{ name: 'ping', description: 'p', inputSchema: {} }],
       }),
     ).rejects.toThrow(/tool/i);
+    // A tool result inside the content array is genuinely unrepresentable — still refuse.
+    await expect(
+      provider.createMessage({
+        ...baseRequest,
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', toolUseId: 't1', content: 'x' }],
+          },
+        ],
+      }),
+    ).rejects.toThrow(/cannot represent/i);
   });
 });
