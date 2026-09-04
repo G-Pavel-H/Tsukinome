@@ -48,4 +48,23 @@ describe('renderCostSummary', () => {
     ]);
     expect(out).toContain('| review | 1 | 100/5 |');
   });
+
+  // AC11 — duration is displayed via formatDuration rather than as raw milliseconds
+  it('shows human-readable duration instead of raw milliseconds (AC11)', () => {
+    // Cast to the new signature (durationMs added by the implementation).
+    // Pre-implementation this call succeeds at runtime but the assertion fails
+    // because the output does not yet contain the formatted duration.
+    type WithDuration = (calls: LlmCall[], durationMs: number) => string;
+    const render = renderCostSummary as unknown as WithDuration;
+
+    const out = render(
+      [call({ role: 'triage', inputTokens: 100, outputTokens: 20, costNanoUsd: 120_000 })],
+      65_000,
+    );
+
+    // Must contain the human-readable form produced by formatDuration(65000).
+    expect(out).toContain('1m 5s');
+    // Must NOT expose the raw millisecond count.
+    expect(out).not.toContain('65000');
+  });
 });
