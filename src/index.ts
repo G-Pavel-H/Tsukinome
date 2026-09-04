@@ -115,6 +115,7 @@ async function main() {
     openSandbox: openCodeSandbox,
     log,
     runBudgetNanoUsd: config.runBudgetNanoUsd,
+    subscriptionRunBudgetNanoUsd: config.subscriptionRunBudgetNanoUsd,
     setupBaseUrl: config.setupBaseUrl,
   });
 

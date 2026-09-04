@@ -8,11 +8,11 @@ The full build plan is in **`docs/implementation-plan.md`**. Read it before doin
 
 1. **Phase by phase, in order.** Do exactly one phase at a time, from `docs/implementation-plan.md`. Never start a phase before the previous one's exit criteria pass.
 2. **Plan mode first.** At the start of a phase, propose the approach for *that phase only* and wait for my approval before editing.
-3. **Stop and report at every phase boundary.** When a phase's exit criteria are met: update `PROGRESS.md`, summarise what you did + the demo + what's next, then **stop and wait for my go-ahead**. Do not roll into the next phase.
+3. **Stop and report at every phase boundary.** When a phase's exit criteria are met: update `PROGRESS-POST-GA.md`, summarise what you did + the demo + what's next, then **stop and wait for my go-ahead**. Do not roll into the next phase.
 4. **Dogfood TDD.** Write the failing test before the implementation, every time. Tsukinome enforces test-first on its users; we build it test-first too.
 5. **Each phase ends green and deployable.** One branch + one PR per phase, off `develop` and back into `develop`. Never leave `develop` or `main` broken.
 6. **Instrument cost from day one.** Once the LLM gateway exists (Phase 3), every model call logs tokens + dollar cost against the run. Never add an uninstrumented call.
-7. **Keep `PROGRESS.md` current** — phase status, decisions, and any deviations from the plan. If the plan turns out wrong, update the plan rather than silently diverging.
+7. **Keep `PROGRESS-POST-GA.md` current** — phase status, decisions, and any deviations from the plan. (`PROGRESS.md` is the frozen pre-GA record; don't append to it.) If the plan turns out wrong, update the plan rather than silently diverging.
 
 ## Locked decisions (don't relitigate without asking)
 

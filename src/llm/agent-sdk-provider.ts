@@ -21,6 +21,9 @@ export class SubscriptionRateLimitError extends Error {
   }
 }
 
+/** Turns allowed per call: one to answer, the rest for the SDK's schema-conformance retries. */
+const MAX_TURNS = 4;
+
 const EMPTY_USAGE: Usage = {
   inputTokens: 0,
   outputTokens: 0,
@@ -60,6 +63,14 @@ interface ResultMessage {
   result?: string;
   structured_output?: unknown;
   modelUsage?: Record<string, ModelTokens>;
+  num_turns?: number;
+  stop_reason?: string | null;
+  errors?: unknown;
+}
+
+interface AssistantMessage {
+  type: 'assistant';
+  message?: { content?: Array<{ type?: string; text?: string }> };
 }
 
 interface RateLimitMessage {
@@ -73,6 +84,59 @@ function isResult(m: SDKMessage): m is SDKMessage & ResultMessage {
 
 function isRateLimit(m: SDKMessage): m is SDKMessage & RateLimitMessage {
   return m.type === 'rate_limit_event';
+}
+
+function isAssistant(m: SDKMessage): m is SDKMessage & AssistantMessage {
+  return m.type === 'assistant';
+}
+
+/** What the assistant actually said, so a failure can show it rather than just a subtype. */
+function assistantText(m: AssistantMessage): string {
+  return (m.message?.content ?? [])
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('');
+}
+
+const TRANSCRIPT_TAIL = 2;
+const TRANSCRIPT_CHARS = 400;
+
+/**
+ * Build the error for a failed call. A spent subscription gets its own type so the worker can
+ * refuse terminally; everything else carries enough detail to diagnose without a repro — the
+ * subtype, how many turns were burned, and the last thing the model said.
+ */
+function failureFor(opts: {
+  cause?: unknown;
+  result?: ResultMessage;
+  rateLimit?: RateLimitMessage['rate_limit_info'];
+  transcript: string[];
+}): Error {
+  if (opts.rateLimit?.status === 'rejected') {
+    return new SubscriptionRateLimitError(
+      opts.rateLimit.resetsAt ? new Date(opts.rateLimit.resetsAt * 1000) : undefined,
+    );
+  }
+
+  const parts: string[] = [];
+  if (opts.result) {
+    parts.push(`subtype=${opts.result.subtype}`);
+    if (opts.result.num_turns !== undefined) parts.push(`turns=${opts.result.num_turns}`);
+    if (opts.result.stop_reason) parts.push(`stop_reason=${opts.result.stop_reason}`);
+    if (opts.result.errors !== undefined && opts.result.errors !== null) {
+      parts.push(`errors=${JSON.stringify(opts.result.errors).slice(0, 300)}`);
+    }
+  }
+  if (opts.cause) {
+    parts.push(`cause=${opts.cause instanceof Error ? opts.cause.message : String(opts.cause)}`);
+  }
+  const tail = opts.transcript
+    .slice(-TRANSCRIPT_TAIL)
+    .map((t) => t.slice(0, TRANSCRIPT_CHARS))
+    .filter(Boolean);
+  if (tail.length) parts.push(`lastSaid=${JSON.stringify(tail)}`);
+
+  return new Error(`Agent SDK call failed (${parts.join(' ') || 'no detail'})`);
 }
 
 /**
@@ -95,16 +159,33 @@ export class AgentSdkProvider implements LlmProvider {
 
     let lastRateLimit: RateLimitMessage['rate_limit_info'];
     let result: ResultMessage | undefined;
+    const transcript: string[] = [];
 
-    for await (const message of this.runQuery({ prompt, options: this.optionsFor(req) })) {
-      if (isRateLimit(message)) lastRateLimit = message.rate_limit_info;
-      else if (isResult(message)) result = message;
+    // The SDK yields an error result and *then* throws out of the iterator, so the catch is not
+    // optional — without it the error escapes before we can classify it, and a spent
+    // subscription is indistinguishable from any other fault.
+    try {
+      for await (const message of this.runQuery({ prompt, options: this.optionsFor(req) })) {
+        if (isRateLimit(message)) lastRateLimit = message.rate_limit_info;
+        else if (isResult(message)) result = message;
+        else if (isAssistant(message)) transcript.push(assistantText(message));
+      }
+    } catch (cause) {
+      throw failureFor({ cause, result, rateLimit: lastRateLimit, transcript });
     }
 
     if (!result) throw new Error('Agent SDK produced no result message');
     if (result.subtype !== 'success') {
-      if (lastRateLimit?.status === 'rejected') throw rateLimitError(lastRateLimit.resetsAt);
-      throw new Error(`Agent SDK call failed: ${result.subtype}`);
+      throw failureFor({ result, rateLimit: lastRateLimit, transcript });
+    }
+    // A success with no structured output is still a failure for us: the runner is about to
+    // JSON.parse this, and the free-form text would fail there with a far worse message.
+    if (req.outputSchema && result.structured_output === undefined) {
+      throw failureFor({
+        cause: 'run succeeded but produced no structured output',
+        result,
+        transcript,
+      });
     }
 
     const usage = sumUsage(result.modelUsage);
@@ -130,34 +211,61 @@ export class AgentSdkProvider implements LlmProvider {
       ...(req.outputSchema ? { outputFormat: { type: 'json_schema', schema: req.outputSchema } } : {}),
       // Sealed shut. Issue bodies and comments reach this prompt as data; a harness holding Bash
       // or Edit would turn that data into commands, and repo settings could rewrite the role's
-      // instructions. One turn, no tools, no filesystem config — this is the safety invariant.
+      // instructions.
+      //
+      // `tools: []` is what actually removes the built-in toolset. `allowedTools: []` does NOT:
+      // per the SDK, that list only names tools auto-approved without prompting, so the tools
+      // stayed in the model's context. The architect then spent every turn trying to call one
+      // (`stop_reason=tool_use`) and never delivered a plan.
+      tools: [],
       allowedTools: [],
       settingSources: [],
       permissionMode: 'default',
-      maxTurns: 1,
-      // Only the installation's own credential — never the operator's ambient environment.
-      env: { CLAUDE_CODE_OAUTH_TOKEN: this.oauthToken },
+      // The SDK re-prompts itself when structured output doesn't satisfy the schema, and each
+      // attempt costs a turn. A cap of 1 left no room for that and failed the roles with the
+      // largest schemas (architect, test-author) outright. Bounded, not unbounded — the run
+      // budget in the gateway is the real cost ceiling.
+      maxTurns: MAX_TURNS,
+      // `env` REPLACES the subprocess environment rather than merging, so the inherited vars the
+      // binary needs (PATH, HOME, proxy and CA settings) have to be passed through explicitly.
+      // The two Anthropic credentials are then cleared: both outrank an OAuth token in the CLI's
+      // resolution order, so an operator key left in the environment would silently bill the
+      // operator instead of the installation's own subscription.
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: undefined,
+        ANTHROPIC_AUTH_TOKEN: undefined,
+        CLAUDE_CODE_OAUTH_TOKEN: this.oauthToken,
+      },
     } as Options;
   }
 }
 
-function rateLimitError(resetsAtEpochSeconds?: number): SubscriptionRateLimitError {
-  return new SubscriptionRateLimitError(
-    resetsAtEpochSeconds ? new Date(resetsAtEpochSeconds * 1000) : undefined,
-  );
-}
-
 /**
- * Flatten the request to the one shape the harness takes. Every production role sends exactly
- * one user turn with no tools; anything else would have to be dropped or faked, so refuse loudly.
+ * Flatten the request to the one shape the harness takes: a single user turn of text.
+ *
+ * Content arrives either as a plain string or as text blocks — the TDD roles use blocks so a
+ * prompt-cache breakpoint can sit between the stable prefix and the volatile tail. The Agent SDK
+ * manages its own caching, so the breakpoint has nothing to attach to here and the blocks simply
+ * concatenate. Anything that isn't text (a tool call or result) genuinely cannot be represented,
+ * so that still refuses rather than silently dropping content.
  */
 function singleUserPrompt(req: LlmRequest): string {
   if (req.tools?.length) {
     throw new Error('AgentSdkProvider does not support tool-use roles');
   }
   const [message, ...rest] = req.messages;
-  if (!message || rest.length > 0 || typeof message.content !== 'string') {
-    throw new Error('AgentSdkProvider requires a single user message with string content');
+  if (!message || rest.length > 0 || message.role !== 'user') {
+    throw new Error('AgentSdkProvider requires a single user message');
   }
-  return message.content;
+  if (typeof message.content === 'string') return message.content;
+
+  const texts: string[] = [];
+  for (const block of message.content) {
+    if (block.type !== 'text') {
+      throw new Error(`AgentSdkProvider cannot represent a ${block.type} block in a prompt`);
+    }
+    texts.push(block.text);
+  }
+  return texts.join('\n\n');
 }
