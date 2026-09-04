@@ -544,50 +544,119 @@ Add the Python pack (pip/pytest, its test conventions + source extensions + sand
 - **Make it visible and consented.** Choosing a test framework for someone is opinionated, so surface it: record "this repo had no tests; Tsukinome added a `<runner>` setup" as an explicit assumption in the spec and in the PR body (audit trail), and consider routing it through the existing **plan-approval gate** so the human okays the framework choice before code is written.
 - **Bounded, idempotent, graceful.** Bootstrap at most once per run; skip entirely when a test setup already exists (repos with tests are completely unaffected); and if the resolved language pack has no bootstrap recipe, fall back to today's clear refusal with a specific reason ("no tests found and no scaffolding recipe for `<language>`") rather than failing mid-run.
 
-**Rough exit criteria:** a TS/JS or Python repo with **zero tests** goes issue → (detect: no test setup) → **bootstrap a minimal runner + one green example test, committed as a distinct step** → the normal test-first loop then implements the requested change red→green on top of that baseline → the PR contains both the test-setup bootstrap and the feature work, with the "no tests existed; added setup" decision recorded in the spec/PR; a repo that **already** has tests is untouched (no bootstrap path taken); a supported language with **no** bootstrap recipe degrades gracefully with a clear reason. TS/JS and Python paths both covered (mirror the Phase 13 per-language delivery split if it's cleaner as two PRs).
+**Exit criteria — met.** An installation can authenticate with a Claude Pro/Max subscription
+instead of an API key, chosen on the connect page; a run then draws its model usage from that
+subscription through the Agent SDK, while the API-key path is byte-for-byte unchanged and remains
+the pay-as-you-go alternative; the auth type + credential are stored encrypted per installation and
+purged on uninstall; rate-limit exhaustion is surfaced gracefully rather than crashing a run; and
+the feature is gated behind a flag with a one-flip kill-switch back to API keys, documented with
+its policy caveat. **Still to verify live:** an end-to-end issue → PR run billed to a subscription,
+and the memory envelope on Render.
 
-#### What was actually built (2026-08-01)
+**Open questions (narrowed):** does **prompt caching** still pay off through the SDK path, given we lose our own breakpoints (measure `cache_read` equivalents, if the SDK reports them); how to **capture and refresh** a subscription token for a hosted service (interactive OAuth vs a pasted `setup-token`, and its expiry/rotation); do **Team/Enterprise** subscriptions behave differently from Pro/Max; how to gate **model tiers** against plan tier (Opus needs Max); and what the memory envelope actually is on Render with a spawned binary per call.
 
-Delivered as **one PR covering both languages** — the detection gate, the sandbox seam, the
-verify-then-commit step and the consent plumbing are all shared, so a per-language split would have
-put ~90% of the work in the first PR and delayed end-to-end verification. Three insertion points,
-**no new run states and no new job types**:
+### Phase 2.2 — OpenRouter compatibility (bring any model, alongside Claude)
 
-1. **Detect at plan time** — inside `retrieveCodeContext` (`src/worker/handlers.ts`), which already
-   has a host checkout. `src/pipeline/test-setup.ts` classifies into `none` / `full` / `runner-only`.
-2. **Consent at the existing plan gate** — the verdict is disclosed in `plan.md` and the gate
-   comment, and `/approve` covers it. Persisted as `context.bootstrap`.
-3. **Execute at implement time** — `handleImplement` runs `src/pipeline/bootstrap.ts` before the
-   task loop and commits via the existing `commitTaskFiles`.
+**The aim.** Today every model call is Claude, chosen by us: `src/llm/models.ts` pins Haiku for
+triage, Sonnet for implementation, Opus for spec/plan/review. That is a good default and a hard
+requirement — a user without an Anthropic account or subscription cannot use Tsukinome at all, and
+a user who wants to run a free or open-weight model has no way to. Add **OpenRouter as a second
+provider alongside Claude**, so an installation can supply an OpenRouter key and run the pipeline
+on whatever model they choose.
 
-Decisions that differ from the sketch above:
+**The shape of the decision we've already made.** The obvious design question is whether users pick
+a model *per stage* (mirroring our tiers) or *one model for everything*. **One model for
+everything.** Per-stage configuration is more powerful and much worse: it is a wall of choices at
+setup time, it invites incoherent combinations, and it multiplies the support surface. A single
+"which model?" field is something a user can answer in five seconds. The tier abstraction stays in
+the code — roles keep asking for `triage`/`implementation`/`review` — but on an OpenRouter
+installation all three resolve to the one model the user named.
 
-- **Fully deterministic — no scaffolding agent.** The recipe is a fixed handful of files per
-  language with no variance worth a model call, and the green gate makes correctness checkable.
-  Zero tokens, zero flakiness, directly unit-testable.
-- **Verified before committed.** Write config + example test → install the runner → run the suite →
-  commit **only if green**. A runner config that doesn't collect tests would make the loop's first
-  red unfixable (the implementer may not edit tests) — the 2026-07-13 false-red failure mode.
-- **Recorded in `plan.md` + the plan gate comment + the PR body, not the spec.** Detection happens
-  at plan time, *after* the spec artifact is committed, so recording it in the spec would mean
-  rewriting it. The plan is also where consent lives, so the two stay together.
-- **`hasTestRunner` is a per-pack predicate, not a file-existence check.** `pyproject.toml` is in
-  Python's `testConfigFiles` and exists in nearly every Python repo; npm writes a placeholder
-  `test` script that only ever exits 1. Both had to be excluded explicitly.
-- **`runner-only` never authors or edits the repo's tests.** If their existing tests don't pass
-  under the new runner, we refuse rather than "fix" them.
-- **Adjacent fix:** `TYPESCRIPT_JAVASCRIPT.installCmd` is now `npm ci || npm install`. `npm ci`
-  throws on a missing/stale lockfile at sandbox *open* — before any bootstrap could help — and
-  Python's pack was already tolerant (`|| true`).
+**Where it fits the existing seams.** This is the third provider behind `LlmProvider`, after
+`AnthropicProvider` and `AgentSdkProvider`, resolved per-installation by `buildProviderResolver`
+exactly as the other two are. The credential is another row in the same vault with another
+`auth_type`. The connect page grows a third option. Nothing above the provider seam should need to
+know.
 
+**What to think hard about (not yet decided):**
+- **Weaker models will fail differently.** The pipeline leans on schema-constrained structured
+  output at every stage. Many OpenRouter models are poor at it, or don't support it at all. Decide
+  what the floor is: refuse models that can't do structured output, fall back to prompt-and-parse,
+  or let the run fail with a clear message naming the model as the cause.
+- **Cost accounting.** `pricing.ts` knows Anthropic's rates. OpenRouter publishes per-model pricing
+  and returns generation cost — decide whether to read theirs or keep a table.
+- **Set expectations honestly.** A free model will produce worse specs, worse plans and worse code.
+  The product should say so at the point of choosing, not let users conclude Tsukinome is bad.
+- **Which model is the default suggestion,** and whether we validate the user's choice against a
+  known-good list at setup time.
 
----
+**Rough exit criteria:** an installation can connect an OpenRouter key and a model name, and a full
+issue → PR run completes on it; the Claude paths are byte-for-byte unchanged; cost is recorded for
+OpenRouter runs too; a model that can't satisfy the pipeline fails with a message that names the
+model rather than looking like a Tsukinome bug.
 
-## 8. Post-launch backlog (v2)
+### Phase 2.3 — Label-gated pickup, and a label for ungated runs
 
-> Deliberately **after** the public launch. Not required to ship. These are version-2 upgrades — revisit once the product is live and has real usage.
+**The aim.** Tsukinome currently starts work on **every** issue opened on a connected repo. That is
+the wrong default for a real repository: most issues are not work for an agent, and an agent that
+begins drafting a spec on a bug report nobody asked it to touch is noise at best. Gate pickup
+behind a **label** — no label, no run — so adopting Tsukinome on a busy repo is safe.
 
-### Phase 2.1 — Declared toolchain (optional `.tsukinome/config.yml`) — cheap path to more languages
+Then the opposite lever: a **second label that skips the human gates**. Today every run stops for
+clarification and again for plan approval. For a small, well-specified issue that ceremony is
+heavier than the task. A "let it run" label should take the issue straight through to a PR without
+parking, for people who would rather review the PR than the plan.
+
+**What to think hard about (not yet decided):**
+- **Label names**, and whether they're configurable or fixed. Fixed is simpler and discoverable;
+  configurable needs the Phase 2.5 config file.
+- **Labelling an existing issue** should probably start a run — the trigger is the label, not the
+  issue being new.
+- **The ungated path still needs a floor.** Budget, fix-round cap and the refusal paths must all
+  still apply; "skip the gates" means skip *waiting for a human*, not skip the safety rails.
+- **What happens at a gate that would have asked a question.** If the clarifier has real questions
+  and nobody will answer, does the run proceed on assumptions and state them in the PR, or stop?
+  Proceeding-with-stated-assumptions is probably right, and needs the spec to record them.
+
+**Rough exit criteria:** an unlabelled issue is ignored entirely (no comment, no run, no spend); a
+labelled one runs as today; the ungated label produces a PR with no human turn in between, with
+assumptions recorded; both labels are documented in the README.
+
+### Phase 2.4 — Operating cost and run lifecycle
+
+**The aim.** Running Tsukinome costs more than it should, in ways that have nothing to do with
+model spend.
+
+**The Neon problem, diagnosed 2026-09-04.** 100 free compute units disappeared quickly and the
+cause is in our code, not Neon's billing: **the worker polls the `jobs` table every second**
+(`DEFAULT_POLL_INTERVAL_MS = 1000` in `src/worker/worker.ts`), forever, whether or not there is any
+work. Neon bills by compute *active time* and only suspends an endpoint after a few minutes with no
+queries — so a query every second means the endpoint **never** scales to zero and we are billed
+around the clock for an idle system. The hourly stale sweep would keep it awake on its own too.
+Fixing this is mostly about not touching the database when there's nothing to do: back off the poll
+when the queue is empty, or move to `LISTEN`/`NOTIFY` so an enqueue wakes the worker instead of the
+worker asking. Either way the target is an idle deployment that lets Neon suspend.
+
+**The listening-window problem.** A parked run currently waits **3 days** before a reminder and
+**7 days** before closing (`PING_AFTER_MS` / `CLOSE_AFTER_MS` in `src/worker/stale.ts`). That is far
+too long: it holds state, keeps rows live, and means a forgotten issue lingers for a week. Bring it
+down to roughly **24 hours**, and apply the same thinking after a PR is opened — Tsukinome should
+respond to review comments for about a day, then stop listening rather than staying attached
+indefinitely.
+
+**What to think hard about (not yet decided):**
+- **Whether 24 hours is right for every gate.** Waiting on a clarification reply and waiting on a
+  PR review are different human rhythms; a single number may not fit both.
+- **How a run ends politely.** Closing should leave a comment saying how to restart, not vanish.
+- **Whether idle cost is a Neon problem or an architecture problem.** If the worker can be made to
+  sleep properly, Neon's free tier is fine; if not, that's an argument about where state lives.
+- Measure before and after — the point is a bill that drops, not a cleaner-looking loop.
+
+**Rough exit criteria:** an idle deployment lets the database endpoint suspend, demonstrated by
+Neon's own compute metrics; parked runs ping and close on the shorter windows; a closed run leaves
+a comment explaining how to restart; no change to how an active run behaves.
+
+### Phase 2.5 — Declared toolchain (optional `.tsukinome/config.yml`) — cheap path to more languages
 
 **The problem we're solving:** After Phase 13, adding each new language (Java/Maven-or-Gradle, C#/dotnet, Go, Rust…) means building and maintaining a full **auto-detecting** language pack — heuristics for that ecosystem's manifests, install/test commands, test conventions, and edge cases. That's real per-language overhead, and detection is exactly where the ambiguity lives (Maven vs Gradle, monorepos, non-standard test scripts). We want a way to support more languages **without** writing bespoke detection for each — and to let any repo remove the guessing entirely when it wants to.
 
@@ -612,21 +681,31 @@ Decisions that differ from the sketch above:
 
 **Open questions (to review with Claude Code CLI):** file format (YAML vs TOML vs JSON); how much a declared config alone can enable a language with no pack (generic runtime vs known-runtime-only); monorepo / per-directory or per-package configs; precedence when both a config file *and* a detectable pack exist (config wins — confirm); whether to also allow declaring the `build` step and lint for richer verification.
 
-### Phase 2.2 — Subscription authentication (bring your Claude Pro/Max plan, alongside BYO API key)
+### Phase 2.6 — Bring-your-own and pooled infrastructure keys (E2B, Neon)
 
-**The problem we're solving:** BYO API key (Phase 12) means every installation pays **pay-as-you-go API dollars** — a second, metered bill on top of the Claude subscription many of our users already have. That's a real adoption and cost barrier: a developer already paying for Claude Pro/Max would rather have Tsukinome draw from the plan they're already buying than rack up separate Console spend. Add **subscription-based authentication as a second option that lives *alongside* the existing API-key path**, so an installation can choose, at setup, to bill its runs to a user's Claude Pro/Max plan instead of an API key. This is explicitly *additive* — the API-key path stays the default and the backbone.
+**The aim.** Model spend is already the user's (Phase 12 and 2.1). Everything *else* is still the
+operator's: one E2B key runs every sandbox, one Neon database holds every installation's state. That
+is the remaining thing that doesn't scale — a single E2B key is a single rate limit and a single
+bill, and one database is one blast radius.
 
-**Why it's a restructure, not a drop-in (context):** Tsukinome authenticates to Anthropic with an **API key against the raw Messages API** (`AnthropicProvider` → `createMessage`, model-tiered Haiku/Sonnet/Opus). A Claude **subscription cannot drive the raw Messages API** — subscription OAuth only works **through the Claude Agent SDK / Claude Code runtime**. So supporting it means a **second `LlmProvider` implementation** that routes model calls through the Agent SDK using the user's subscription OAuth token, selected per-installation behind the existing `ProviderResolver` seam (Phase 12a). The per-installation credential vault + the OAuth setup page (Phase 12b) are the natural home: generalize "bring your API key" into "bring your API key **or** your Claude subscription." The gateway, agent runner, cost logging, budget and caching all sit *above* the provider seam, so in principle only the credential model + a new provider change — but see the open questions, because caching and the tool-loop may not survive the SDK path unchanged.
+Two related moves. First, **more than one operator key**: pool E2B (and Neon, if it stays
+operator-owned) so load spreads across keys rather than piling onto one. Second, **let users bring
+their own**, the same way they bring their own model credential — an installation supplying its own
+E2B key runs its sandboxes on its own account, and the same for its own database if it wants its
+state isolated.
 
-**Ideas for the solution (to refine — not final technical decisions; implementation left to Claude Code CLI):**
-- **Dual credential model.** Extend the per-installation vault to store *either* an encrypted API key *or* a subscription OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`), with an explicit auth-type discriminator on the installation. `buildProviderResolver` branches on it to construct the right provider per run.
-- **A second provider behind the same interface.** Keep `LlmProvider` untouched; add an Agent-SDK-backed implementation for subscription installs. Everything above the seam (gateway instrumentation, per-run budget, role runner, tool-use loop) is reused unchanged where possible.
-- **Setup page gains "Sign in with Claude."** The Phase 12b OAuth surface adds a second path: instead of pasting an API key, the user authorizes their subscription (or supplies a token minted via `claude setup-token`), which is validated, encrypted, and stored — re-visitable to rotate, purged on uninstall, exactly like the API key.
-- **Metering semantics differ and must be modelled.** Subscription usage draws from **rate-limited windows, not dollars**, so the per-run USD budget/cost accounting needs a parallel notion for subscription runs (track token/limit consumption; surface "you've hit your plan's limit — try again after it refreshes" rather than "budget exhausted"). Model-tier access differs too (Opus needs Max-tier) — tier-gate gracefully.
-- **Stay strictly on the sanctioned path.** Route only through the official Agent SDK. **Never** extract the raw OAuth token to hit the Messages API directly or via a translating proxy — that is the ToS-violating pattern that gets accounts flagged. The token carries the same encrypt-at-rest / never-log / redact / purge-on-uninstall invariants as the API key.
+**What to think hard about (not yet decided):**
+- **These two are different problems.** Pooling is an operator capacity concern; BYO is a tenancy
+  and trust concern. They may want to be separate phases once the shape is clearer.
+- **A user-supplied Neon database is a much bigger step than a user-supplied E2B key** — it means
+  running migrations against a database we don't control, and it changes where a run's state lives.
+  Consider whether that is genuinely wanted or whether isolation within our database is enough.
+- **Failure modes get user-visible.** A bad or exhausted user E2B key must produce a clear refusal,
+  the way a missing model credential already does — not a cryptic sandbox error.
+- **The vault already holds per-installation secrets** and the connect page already chooses between
+  credential types, so both extend rather than needing new machinery.
 
-**Risk to carry — policy volatility (load-bearing):** Anthropic's stance on subscription-backed programmatic and third-party usage changed **three times in 2026** (Feb: banned OAuth in third-party apps → May: announced a separate monthly Agent SDK credit that *would* cover third-party Agent-SDK apps → June 15: paused that change, reverting to "third-party app usage still draws from your subscription's usage limits"), and they've said further revisions will come with advance notice. Treat this whole path as **experimental, behind a feature flag**, re-verify the Consumer Terms of Service at build time, and keep BYO API key the default. Anthropic explicitly steers *scaled/production* automation toward API keys, so frame subscription auth as a **convenience for individual Pro/Max users**, not the backbone — and build a kill-switch so it can be disabled cleanly if the policy shifts again.
-
-**Rough exit criteria:** at setup, an installation can choose to authenticate with its Claude Pro/Max subscription **instead of** an API key; a run then draws its model usage from that subscription **through the Agent SDK**, while the API-key path is byte-for-byte unchanged; the auth type + credential are stored encrypted per installation and purged on uninstall; rate-limit exhaustion is surfaced gracefully (the parallel of budget exhaustion) rather than crashing a run; the feature is gated behind a flag and documented with its ToS caveat and kill-switch.
-
-**Open questions (to review with Claude Code CLI):** can the gateway keep **prompt caching + the tool-use loop** through the Agent SDK path, or do they degrade (the biggest technical bottleneck); how does per-run **budget/cost** map onto subscription **rate-limit windows** (dollars vs limits — two different currencies); how to **capture and refresh** a subscription token for a *hosted* service (interactive OAuth on the setup page vs a pasted `setup-token`, and its expiry/rotation); do **Team/Enterprise** subscriptions behave differently from Pro/Max; how to gate **model tiers** against plan tier (Opus↔Max); and what the **kill-switch / fallback** is if Anthropic re-restricts or re-meters this again.
+**Rough exit criteria:** operator keys can be pooled and a single key's exhaustion doesn't stop the
+service; an installation can supply its own E2B key and its runs use it; a bad user-supplied key
+refuses gracefully with guidance; the operator-owned path still works untouched for installations
+that supply nothing.

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { toJSONSchema } from 'zod';
 import type {
   ContentBlock,
   LlmMessage,
@@ -67,6 +68,10 @@ export async function runAgent<T = unknown>(
 
   const system = instructionSystem(role);
   const outputFormat = role.schema ? zodOutputFormat(role.schema) : undefined;
+  // draft-07 is the dialect the Agent SDK validates against; the Messages API path keeps its own.
+  const outputSchema = role.schema
+    ? (toJSONSchema(role.schema, { target: 'draft-7' }) as Record<string, unknown>)
+    : undefined;
   const tier = input.tierOverride ?? role.tier;
   const messages: LlmMessage[] = [...input.messages];
 
@@ -86,6 +91,7 @@ export async function runAgent<T = unknown>(
       maxTokens: role.maxTokens,
       tools: hasTools ? role.tools!.map((t) => t.spec) : undefined,
       outputFormat,
+      outputSchema,
     });
     rounds += 1;
     last = response;

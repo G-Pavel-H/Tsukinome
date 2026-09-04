@@ -65,6 +65,7 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 | `MASTER_ENCRYPTION_KEY` | yes | — | Base64, decodes to **32 bytes** (`openssl rand -base64 32`). Encrypts per-installation keys at rest (AES-256-GCM). |
 | `ANTHROPIC_API_KEY` | fallback only | — | Operator/platform key. **Optional** under BYO; required only when `ALLOW_PLATFORM_KEY_FALLBACK=true`. |
 | `ALLOW_PLATFORM_KEY_FALLBACK` | no | `false` | When `true`, installations with no key on file use the operator `ANTHROPIC_API_KEY` (self-host / dogfooding). Off → missing keys are refused, never billed to the operator. |
+| `ALLOW_SUBSCRIPTION_AUTH` | no | `false` | When `true`, an installation whose credential is labelled `subscription` runs against its own Claude plan via the Agent SDK. Off → those installations are refused, exactly as if they had no key. See below. |
 | `GITHUB_CLIENT_ID` | setup page | — | GitHub App OAuth client id (enables the setup page). |
 | `GITHUB_CLIENT_SECRET` | setup page | — | GitHub App OAuth client secret. |
 | `SETUP_BASE_URL` | setup page | — | Public origin (no trailing slash), e.g. `https://tsk.example.com`. Used for OAuth redirects + setup links. |
@@ -73,6 +74,7 @@ Set these (e.g. in your host's secret manager, or a local `.env`):
 | `DATABASE_URL` | yes | — | Postgres connection string (pgvector-capable). |
 | `COCOINDEX_PYTHON` | optional | `python3` | Path to the venv interpreter that has the code-index sidecar deps (see below). Unset → bare `python3`; if that lacks the deps, plan-time code retrieval degrades gracefully. |
 | `RUN_BUDGET_USD` | no | `1.00` | Per-run model-spend ceiling. |
+| `SUBSCRIPTION_RUN_BUDGET_USD` | no | `25.00` | Per-run ceiling for installations billing to a Claude subscription. Their usage is metered in rate-limit windows, not dollars, so this is a runaway guard rather than a spend cap — a tight figure would stop healthy runs while protecting nothing. |
 | `PORT` | no | `3000` | Webhook HTTP port. |
 
 > This environment's permission settings block editing `.env*` from the agent, so there is no
@@ -94,6 +96,40 @@ supply keys:
   `ALLOW_PLATFORM_KEY_FALLBACK=true`, and provide the operator `ANTHROPIC_API_KEY`. Every installation
   then uses that one key — the pre-Phase-12 behaviour. With the page unset and fallback off, `/setup`
   renders a "not configured" notice and runs without a key are refused.
+
+### Subscription auth (Phase 2.1)
+
+An installation can bill its runs to a **Claude Pro/Max subscription** instead of a pay-as-you-go
+API key. The credential is stored and encrypted exactly like an API key, with a `subscription`
+label that routes the run through the Claude Agent SDK rather than the Messages API.
+
+**Set `ALLOW_SUBSCRIPTION_AUTH=1` to offer it.** With the flag off (the default), the connect page
+still shows the option but refuses it on submit rather than storing a credential every run would
+then reject; existing subscription installations fall straight back to needing an API key. That
+one variable is the kill-switch, and flipping it needs no data migration.
+
+Users get there on their own: the connect page leads with "Use my Claude subscription" and walks
+through `claude setup-token`. To set a credential from the command line instead — useful for
+testing before the OAuth round trip works:
+
+```
+npm run debug:set-auth -- <installationId> subscription <token>
+```
+
+Two things behave differently on this path:
+
+- **Cost figures become notional.** A subscription draws on rate-limit windows, not dollars, but
+  Tsukinome keeps pricing the reported tokens at list rates so `RUN_BUDGET_USD`, the per-run budget
+  stop and the PR cost summary all keep working — and stay comparable with API-key runs.
+- **Rate-limit exhaustion replaces budget exhaustion.** When the plan has no capacity left, the run
+  stops gracefully with a comment saying when the limit resets, rather than retrying into the wall.
+
+**On Anthropic's policy.** Their support article *Use the Claude Agent SDK with your Claude plan*
+lists "third-party apps that authenticate with your Claude subscription through the Agent SDK" as
+covered by the user's own plan — which is what this flow is. What the Agent SDK docs still restrict,
+absent prior approval, is *hosting a claude.ai login button*; that also has no public OAuth client
+id for third parties. Hence a paste-your-own-token flow rather than a "Sign in with Claude"
+redirect. Re-check both before building the OAuth version.
 
 ### Sandbox Node version (build the E2B template)
 

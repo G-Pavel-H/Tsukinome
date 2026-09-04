@@ -20,6 +20,14 @@ export interface Config {
    * silently billed to the operator.
    */
   allowPlatformKeyFallback: boolean;
+  /**
+   * Phase 2.1 feature flag. When true, an installation whose credential is labelled
+   * `subscription` runs through the Claude Agent SDK against its own Claude plan instead of the
+   * Messages API. Off by default — subscription-backed runs are experimental and, for third-party
+   * installations, need Anthropic's prior approval. Turning it off is the kill-switch: every
+   * installation falls back to the API-key path with no data migration.
+   */
+  allowSubscriptionAuth: boolean;
   databaseUrl: string;
   e2bApiKey: string;
   /**
@@ -47,17 +55,25 @@ export interface Config {
   port: number;
   /** Per-run budget ceiling in nano-USD. Default $1.00. Override via RUN_BUDGET_USD. */
   runBudgetNanoUsd: number;
+  /**
+   * Per-run ceiling for installations billing to a Claude subscription. Their usage is metered
+   * in rate-limit windows, not dollars, so this figure buys no financial protection — it is
+   * purely a runaway guard, and a tight real-money cap would just stop healthy runs early.
+   * Default $25.00. Override via SUBSCRIPTION_RUN_BUDGET_USD.
+   */
+  subscriptionRunBudgetNanoUsd: number;
 }
 
 const NANO_PER_USD = 1_000_000_000;
 const DEFAULT_RUN_BUDGET_USD = 1.0;
+const DEFAULT_SUBSCRIPTION_RUN_BUDGET_USD = 25.0;
 
-/** Parse RUN_BUDGET_USD (a dollar amount) into integer nano-USD, falling back to the default. */
-function parseRunBudgetNanoUsd(raw: string | undefined): number {
-  if (raw === undefined || raw.trim() === '') return DEFAULT_RUN_BUDGET_USD * NANO_PER_USD;
+/** Parse a dollar-amount budget env var into integer nano-USD, falling back to `fallbackUsd`. */
+function parseBudgetNanoUsd(name: string, raw: string | undefined, fallbackUsd: number): number {
+  if (raw === undefined || raw.trim() === '') return Math.round(fallbackUsd * NANO_PER_USD);
   const usd = Number(raw);
   if (!Number.isFinite(usd) || usd <= 0) {
-    throw new Error(`RUN_BUDGET_USD must be a positive number, got "${raw}"`);
+    throw new Error(`${name} must be a positive number, got "${raw}"`);
   }
   return Math.round(usd * NANO_PER_USD);
 }
@@ -98,6 +114,7 @@ export function loadConfig(): Config {
     platformAnthropicKey,
     masterEncryptionKey: parseMasterKey(process.env.MASTER_ENCRYPTION_KEY!),
     allowPlatformKeyFallback,
+    allowSubscriptionAuth: parseBool(process.env.ALLOW_SUBSCRIPTION_AUTH),
     databaseUrl: process.env.DATABASE_URL!,
     e2bApiKey: process.env.E2B_API_KEY!,
     e2bTemplate: process.env.E2B_TEMPLATE?.trim() || undefined,
@@ -106,6 +123,15 @@ export function loadConfig(): Config {
     githubClientSecret: process.env.GITHUB_CLIENT_SECRET?.trim() || undefined,
     setupBaseUrl: process.env.SETUP_BASE_URL?.trim().replace(/\/+$/, '') || undefined,
     port: parseInt(process.env.PORT ?? '3000', 10),
-    runBudgetNanoUsd: parseRunBudgetNanoUsd(process.env.RUN_BUDGET_USD),
+    runBudgetNanoUsd: parseBudgetNanoUsd(
+      'RUN_BUDGET_USD',
+      process.env.RUN_BUDGET_USD,
+      DEFAULT_RUN_BUDGET_USD,
+    ),
+    subscriptionRunBudgetNanoUsd: parseBudgetNanoUsd(
+      'SUBSCRIPTION_RUN_BUDGET_USD',
+      process.env.SUBSCRIPTION_RUN_BUDGET_USD,
+      DEFAULT_SUBSCRIPTION_RUN_BUDGET_USD,
+    ),
   };
 }

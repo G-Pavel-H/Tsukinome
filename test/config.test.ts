@@ -23,6 +23,8 @@ describe('loadConfig', () => {
     delete process.env.PORT;
     delete process.env.RUN_BUDGET_USD;
     delete process.env.ALLOW_PLATFORM_KEY_FALLBACK;
+    delete process.env.ALLOW_SUBSCRIPTION_AUTH;
+    delete process.env.SUBSCRIPTION_RUN_BUDGET_USD;
     delete process.env.GITHUB_CLIENT_ID;
     delete process.env.GITHUB_CLIENT_SECRET;
     delete process.env.SETUP_BASE_URL;
@@ -111,6 +113,35 @@ describe('loadConfig', () => {
     const config = loadConfig();
     expect(config.allowPlatformKeyFallback).toBe(true);
     expect(config.platformAnthropicKey).toBe('sk-ant-fake-key');
+  });
+
+  it('gives subscription runs a looser default ceiling than pay-as-you-go ones', () => {
+    // Subscription usage is metered in rate-limit windows, so a tight dollar cap would stop
+    // healthy runs while protecting nothing.
+    Object.assign(process.env, validEnv);
+    const config = loadConfig();
+    expect(config.runBudgetNanoUsd).toBe(1_000_000_000);
+    expect(config.subscriptionRunBudgetNanoUsd).toBe(25_000_000_000);
+  });
+
+  it('parses SUBSCRIPTION_RUN_BUDGET_USD', () => {
+    Object.assign(process.env, validEnv, { SUBSCRIPTION_RUN_BUDGET_USD: '5.5' });
+    expect(loadConfig().subscriptionRunBudgetNanoUsd).toBe(5_500_000_000);
+  });
+
+  it('rejects a nonsense SUBSCRIPTION_RUN_BUDGET_USD by name', () => {
+    Object.assign(process.env, validEnv, { SUBSCRIPTION_RUN_BUDGET_USD: 'lots' });
+    expect(() => loadConfig()).toThrow(/SUBSCRIPTION_RUN_BUDGET_USD/);
+  });
+
+  it('leaves subscription auth off unless ALLOW_SUBSCRIPTION_AUTH is explicitly set', () => {
+    Object.assign(process.env, validEnv);
+    expect(loadConfig().allowSubscriptionAuth).toBe(false);
+  });
+
+  it('parses ALLOW_SUBSCRIPTION_AUTH', () => {
+    Object.assign(process.env, validEnv, { ALLOW_SUBSCRIPTION_AUTH: '1' });
+    expect(loadConfig().allowSubscriptionAuth).toBe(true);
   });
 
   it('throws when fallback is enabled but no operator ANTHROPIC_API_KEY is set', () => {

@@ -87,18 +87,44 @@ Open the App's page on GitHub and click **Install**, then choose the repos you w
 **Nothing is added to your repo** — Tsukinome keeps its spec/plan artifacts on its own
 `tsukinome/issue-<n>` working branch.
 
-### 2. Connect your Anthropic key
+### 2. Connect your Claude account
 
-Right after installing, GitHub sends you to Tsukinome's **setup page**. Sign in with GitHub
-(this proves you manage the installation), then paste your **Anthropic API key**. It's validated
-on the spot, then encrypted and stored.
+Right after installing, GitHub sends you to Tsukinome's **connect page**. Sign in with GitHub
+(this proves you manage the installation), then pick how runs should be billed:
 
-> **You bring your own key**, so model usage is billed to *you*, not to whoever hosts the
-> instance. The key is encrypted at rest (AES-256-GCM), never logged or shown again, and is
-> **purged automatically if you uninstall**. Re-visit the same page any time to rotate it.
+| Option | What it uses | How to get it |
+| --- | --- | --- |
+| **Claude subscription** | Your existing **Pro or Max** plan — no separate bill | Run `claude setup-token` in a terminal signed in to that plan; it prints a long-lived `sk-ant-oat…` token to paste in |
+| **Anthropic API key** | Pay-as-you-go Console billing | Create a key at [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 
-If you skip this step, nothing breaks: your first issue gets a comment linking back to the setup
-page, and **no tokens are spent** until a key is on file.
+Either way it's validated on the spot, then encrypted and stored.
+
+> **You bring your own account**, so model usage is billed to *you*, not to whoever hosts the
+> instance. The credential is encrypted at rest (AES-256-GCM), never logged or shown again, and is
+> **purged automatically if you uninstall**.
+
+If you skip this step, nothing breaks: your first issue gets a comment linking back to the connect
+page, and **no tokens are spent** until a credential is on file.
+
+#### Changing it later — no reinstall needed
+
+The connect page is the same URL every time, so **bookmark it**:
+
+```
+https://<tsukinome-host>/setup?installation_id=<your-installation-id>
+```
+
+Open it again to switch between a subscription and an API key, or to rotate either one. The new
+credential replaces the old one on the next run; nothing else changes.
+
+Two ways to find that URL if you didn't bookmark it:
+
+- **From GitHub.** Go to [github.com/settings/installations](https://github.com/settings/installations)
+  (or your org's *Settings → GitHub Apps*), click **Configure** next to Tsukinome, and read the
+  installation id off the end of the address bar. Saving any change there also redirects you
+  straight back to the connect page.
+- **From an issue.** If a run stops because no credential is on file, the comment it leaves links
+  directly to your connect page.
 
 ### 3. Open an issue
 

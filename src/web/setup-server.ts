@@ -2,6 +2,8 @@ import type http from 'node:http';
 import type { Logger } from '../log.js';
 import type { CredentialVault } from '../secrets/credential-vault.js';
 import type { AnthropicKeyValidator } from '../secrets/anthropic-validator.js';
+import type { SubscriptionTokenValidator } from '../llm/subscription-validator.js';
+import type { InstallationAuthType, Store } from '../store/types.js';
 import type { GitHubOAuthClient } from '../github/oauth.js';
 import { SessionStore } from './session-store.js';
 import {
@@ -29,7 +31,10 @@ export interface SetupServerConfig {
 export interface SetupServerDeps {
   oauth: GitHubOAuthClient;
   validateKey: AnthropicKeyValidator;
+  validateSubscriptionToken: SubscriptionTokenValidator;
+  allowSubscriptionAuth: boolean;
   vault: CredentialVault;
+  store: Pick<Store, 'getInstallationAuthType' | 'setInstallationAuthType'>;
   config: SetupServerConfig;
   log: Logger;
   /** Optional injected session store (tests); a fresh one is created otherwise. */
@@ -96,7 +101,10 @@ export function createSetupMiddleware(deps: SetupServerDeps | null): Middleware 
     ? {
         oauth: deps.oauth,
         validateKey: deps.validateKey,
+        validateSubscriptionToken: deps.validateSubscriptionToken,
+        allowSubscriptionAuth: deps.allowSubscriptionAuth,
         vault: deps.vault,
+        store: deps.store,
         sessions,
         config: deps.config,
         log: deps.log,
@@ -143,7 +151,11 @@ export function createSetupMiddleware(deps: SetupServerDeps | null): Middleware 
               {
                 sessionId: cookies[SETUP_COOKIE] ?? null,
                 installationId: parseIntOrNull(body.get('installation_id')),
-                apiKey: body.get('api_key'),
+                authType: body.get('auth_type') as InstallationAuthType | null,
+                secret:
+                  body.get('auth_type') === 'subscription'
+                    ? body.get('subscription_token')
+                    : body.get('api_key'),
               },
               handlerDeps,
             ),

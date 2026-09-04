@@ -3,7 +3,10 @@ import type { CredentialVault } from '../secrets/credential-vault.js';
 import type { AnthropicKeyValidator } from '../secrets/anthropic-validator.js';
 import type { GitHubOAuthClient } from '../github/oauth.js';
 import type { SessionStore } from './session-store.js';
-import { renderErrorPage, renderKeyForm, renderSuccessPage } from './setup-pages.js';
+import type { SubscriptionTokenValidator } from '../llm/subscription-validator.js';
+import { writeInstallationAuth } from '../llm/installation-auth.js';
+import type { InstallationAuthType, Store } from '../store/types.js';
+import { renderCredentialForm, renderErrorPage, renderSuccessPage } from './setup-pages.js';
 
 /** The name of the httpOnly cookie carrying the setup session id. */
 export const SETUP_COOKIE = 'tsukinome_setup';
@@ -12,7 +15,12 @@ const SESSION_MAX_AGE_SEC = 10 * 60;
 export interface SetupDeps {
   oauth: GitHubOAuthClient;
   validateKey: AnthropicKeyValidator;
+  validateSubscriptionToken: SubscriptionTokenValidator;
+  /** Mirrors `ALLOW_SUBSCRIPTION_AUTH`. When off, the subscription option is refused here too —
+   *  storing a credential every run would then reject is worse than saying so up front. */
+  allowSubscriptionAuth: boolean;
   vault: CredentialVault;
+  store: Pick<Store, 'getInstallationAuthType' | 'setInstallationAuthType'>;
   sessions: SessionStore;
   config: { clientId: string; clientSecret: string; baseUrl: string };
   log: Logger;
@@ -93,17 +101,31 @@ export async function handleCallback(
   return {
     kind: 'html',
     status: 200,
-    body: renderKeyForm(installationId),
+    body: renderCredentialForm(installationId),
     cookie: { name: SETUP_COOKIE, value: sessionId, maxAgeSec: SESSION_MAX_AGE_SEC },
   };
 }
 
+function credentialRejected(authType: InstallationAuthType): string {
+  return authType === 'subscription'
+    ? "Anthropic didn't accept that token. Check you copied the whole line from " +
+        '`claude setup-token` (it starts sk-ant-oat), and that the plan it belongs to is active. ' +
+        'The host operator can see the exact reason in the server log.'
+    : 'Anthropic rejected that key. Check it and try again.';
+}
+
 /**
- * `POST /setup/key` — store (or rotate) the key. Re-checks ownership against the session
- * (never a hidden field alone), validates the key with Anthropic, then encrypts + stores.
+ * `POST /setup/key` — store (or rotate) the installation's credential. Re-checks ownership
+ * against the session (never a hidden field alone), validates the credential against the path it
+ * will actually run on, then encrypts + stores it with its auth type.
  */
 export async function handleKeySubmit(
-  input: { sessionId: string | null; installationId: number | null; apiKey: string | null },
+  input: {
+    sessionId: string | null;
+    installationId: number | null;
+    authType: InstallationAuthType | null;
+    secret: string | null;
+  },
   deps: SetupDeps,
 ): Promise<SetupResult> {
   const session = input.sessionId ? deps.sessions.getSession(input.sessionId) : null;
@@ -115,26 +137,52 @@ export async function handleKeySubmit(
     !session.verifiedInstallationIds.includes(input.installationId)
   ) {
     deps.log.warn({ installationId: input.installationId }, 'Key submit rejected: not a verified installation for this session');
-    return html(403, renderErrorPage('Not authorized', 'You are not authorized to set the key for this installation.'));
+    return html(403, renderErrorPage('Not authorized', 'You are not authorized to set the credential for this installation.'));
+  }
+  const installationId = input.installationId;
+
+  const authType = input.authType;
+  if (authType !== 'api_key' && authType !== 'subscription') {
+    return html(400, renderCredentialForm(installationId, 'Choose how you want to connect.'));
+  }
+  if (authType === 'subscription' && !deps.allowSubscriptionAuth) {
+    return html(
+      400,
+      renderCredentialForm(
+        installationId,
+        'This Tsukinome deployment has subscription auth switched off. Use an Anthropic API key.',
+      ),
+    );
   }
 
-  const apiKey = (input.apiKey ?? '').trim();
-  if (!apiKey) {
-    return html(400, renderKeyForm(input.installationId, 'Please paste your Anthropic API key.'));
+  const secret = (input.secret ?? '').trim();
+  if (!secret) {
+    const missing =
+      authType === 'subscription'
+        ? 'Please paste the token from `claude setup-token`.'
+        : 'Please paste your Anthropic API key.';
+    return html(400, renderCredentialForm(installationId, missing));
   }
 
+  const validate = authType === 'subscription' ? deps.validateSubscriptionToken : deps.validateKey;
   let valid: boolean;
   try {
-    valid = await deps.validateKey(apiKey);
+    valid = await validate(secret);
   } catch (err) {
-    deps.log.error({ err: err instanceof Error ? err.message : String(err) }, 'Anthropic key validation errored');
-    return html(502, renderKeyForm(input.installationId, "Couldn't reach Anthropic to validate the key. Please try again."));
+    // Log the cause: "rejected" and "couldn't run the check" look identical to the user, and
+    // only one of them is their problem to fix.
+    deps.log.error(
+      { err: err instanceof Error ? err.message : String(err), authType, installationId },
+      'Credential validation failed',
+    );
+    return html(400, renderCredentialForm(installationId, credentialRejected(authType)));
   }
   if (!valid) {
-    return html(400, renderKeyForm(input.installationId, 'Anthropic rejected that key. Check it and try again.'));
+    deps.log.warn({ authType, installationId }, 'Credential rejected by Anthropic');
+    return html(400, renderCredentialForm(installationId, credentialRejected(authType)));
   }
 
-  await deps.vault.setAnthropicKey(input.installationId, apiKey);
-  deps.log.info({ installationId: input.installationId }, 'Stored Anthropic key for installation');
-  return html(200, renderSuccessPage(input.installationId));
+  await writeInstallationAuth(deps.vault, deps.store, installationId, authType, secret);
+  deps.log.info({ installationId, authType }, 'Stored Anthropic credential for installation');
+  return html(200, renderSuccessPage(installationId, authType));
 }

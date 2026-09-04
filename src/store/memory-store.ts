@@ -23,6 +23,7 @@ import {
   type TestRun,
   type UpdateTaskInput,
   type UpsertInstallationCredentialInput,
+  type InstallationAuthType,
 } from './types.js';
 import type { EncryptedSecret } from '../secrets/crypto.js';
 
@@ -58,7 +59,7 @@ export class InMemoryStore implements Store {
   private llmCalls: LlmCall[] = [];
   private artifacts: Artifact[] = [];
   private tasks: Task[] = [];
-  private credentials = new Map<number, EncryptedSecret>();
+  private credentials = new Map<number, { secret: EncryptedSecret; authType: InstallationAuthType }>();
   private nextJobId = 1;
   private nextRunId = 1;
   private nextTestRunId = 1;
@@ -289,22 +290,41 @@ export class InMemoryStore implements Store {
   }
 
   async upsertInstallationCredential(input: UpsertInstallationCredentialInput): Promise<void> {
-    // Copy the buffers so later mutations by the caller can't corrupt stored state.
+    // Copy the buffers so later mutations by the caller can't corrupt stored state. Rotating a
+    // secret keeps the existing auth type, mirroring the ON CONFLICT clause in PgStore.
+    const existing = this.credentials.get(input.installationId);
     this.credentials.set(input.installationId, {
-      ciphertext: Buffer.from(input.ciphertext),
-      iv: Buffer.from(input.iv),
-      authTag: Buffer.from(input.authTag),
+      secret: {
+        ciphertext: Buffer.from(input.ciphertext),
+        iv: Buffer.from(input.iv),
+        authTag: Buffer.from(input.authTag),
+      },
+      authType: existing?.authType ?? 'api_key',
     });
   }
 
   async getInstallationCredential(installationId: number): Promise<EncryptedSecret | null> {
-    const secret = this.credentials.get(installationId);
-    if (!secret) return null;
+    const stored = this.credentials.get(installationId);
+    if (!stored) return null;
     return {
-      ciphertext: Buffer.from(secret.ciphertext),
-      iv: Buffer.from(secret.iv),
-      authTag: Buffer.from(secret.authTag),
+      ciphertext: Buffer.from(stored.secret.ciphertext),
+      iv: Buffer.from(stored.secret.iv),
+      authTag: Buffer.from(stored.secret.authTag),
     };
+  }
+
+  async getInstallationAuthType(installationId: number): Promise<InstallationAuthType | null> {
+    return this.credentials.get(installationId)?.authType ?? null;
+  }
+
+  async setInstallationAuthType(
+    installationId: number,
+    authType: InstallationAuthType,
+  ): Promise<boolean> {
+    const stored = this.credentials.get(installationId);
+    if (!stored) return false;
+    stored.authType = authType;
+    return true;
   }
 
   async deleteInstallationCredential(installationId: number): Promise<void> {

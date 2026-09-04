@@ -289,6 +289,13 @@ export interface UpsertInstallationCredentialInput extends EncryptedSecret {
   installationId: number;
 }
 
+/**
+ * How an installation authenticates to Anthropic (Phase 2.1). The stored ciphertext is the same
+ * shape either way — a pay-as-you-go API key or a Claude subscription OAuth token — so this
+ * discriminator is what tells the provider resolver which client to build.
+ */
+export type InstallationAuthType = 'api_key' | 'subscription';
+
 /** A committed artifact (e.g. the spec) — the source of truth, re-read by later phases. */
 export type ArtifactKind = 'spec' | 'plan';
 
@@ -357,6 +364,16 @@ export interface Store {
   upsertInstallationCredential(input: UpsertInstallationCredentialInput): Promise<void>;
   /** Fetch an installation's encrypted key at rest, or null if none is on file. */
   getInstallationCredential(installationId: number): Promise<EncryptedSecret | null>;
+  /** The auth type recorded alongside the credential, or null if none is on file. */
+  getInstallationAuthType(installationId: number): Promise<InstallationAuthType | null>;
+  /**
+   * Record the auth type for an existing credential. Returns false when the installation has
+   * no credential row — the secret is always written first, then labelled.
+   */
+  setInstallationAuthType(
+    installationId: number,
+    authType: InstallationAuthType,
+  ): Promise<boolean>;
   /** Purge an installation's stored key (on uninstall). No-op if absent. */
   deleteInstallationCredential(installationId: number): Promise<void>;
 }

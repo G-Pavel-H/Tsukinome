@@ -8,11 +8,13 @@ import { PgStore } from './store/pg-store.js';
 import { createProbotGitHubClient } from './github/client.js';
 import { E2BSandboxProvider } from './sandbox/e2b-sandbox.js';
 import { AnthropicProvider } from './llm/anthropic-provider.js';
+import { AgentSdkProvider } from './llm/agent-sdk-provider.js';
 import { LlmGateway } from './llm/gateway.js';
 import { buildProviderResolver } from './llm/provider-resolver.js';
 import { CredentialVault } from './secrets/credential-vault.js';
 import { HttpGitHubOAuthClient } from './github/oauth.js';
 import { anthropicKeyValidator } from './secrets/anthropic-validator.js';
+import { subscriptionTokenValidator } from './llm/subscription-validator.js';
 import { createSetupMiddleware, type SetupServerDeps } from './web/setup-server.js';
 import { PgVectorCodeIndex } from './index/pgvector-code-index.js';
 import { CocoIndexSidecarRunner, SidecarEmbeddingProvider } from './index/cocoindex-runner.js';
@@ -46,7 +48,10 @@ async function main() {
   const vault = new CredentialVault(store, config.masterEncryptionKey);
   const resolveProvider = buildProviderResolver({
     vault,
+    store,
     factory: (apiKey) => new AnthropicProvider(apiKey),
+    subscriptionFactory: (token) => new AgentSdkProvider(token),
+    allowSubscriptionAuth: config.allowSubscriptionAuth,
     allowPlatformFallback: config.allowPlatformKeyFallback,
     platformKey: config.platformAnthropicKey,
   });
@@ -74,7 +79,10 @@ async function main() {
           clientSecret: config.githubClientSecret!,
         }),
         validateKey: anthropicKeyValidator,
+        validateSubscriptionToken: subscriptionTokenValidator,
+        allowSubscriptionAuth: config.allowSubscriptionAuth,
         vault,
+        store,
         config: {
           clientId: config.githubClientId!,
           clientSecret: config.githubClientSecret!,
@@ -107,6 +115,7 @@ async function main() {
     openSandbox: openCodeSandbox,
     log,
     runBudgetNanoUsd: config.runBudgetNanoUsd,
+    subscriptionRunBudgetNanoUsd: config.subscriptionRunBudgetNanoUsd,
     setupBaseUrl: config.setupBaseUrl,
   });
 

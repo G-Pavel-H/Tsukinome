@@ -107,6 +107,8 @@ export interface HandlerDeps {
   log: Logger;
   /** Optional per-run budget ceiling (nano-USD) applied when a run is first created. */
   runBudgetNanoUsd?: number;
+  /** Ceiling for subscription-billed installations — a runaway guard, not a spend cap. */
+  subscriptionRunBudgetNanoUsd?: number;
 }
 
 export interface RunTestsHandlerDeps extends HandlerDeps {
@@ -155,9 +157,15 @@ export async function handleIssueOpened(job: Job, deps: HandlerDeps): Promise<vo
     RunState.Received,
   );
 
-  // Apply the configured per-run budget ceiling at the one place a run is born.
-  if (created && deps.runBudgetNanoUsd !== undefined) {
-    await store.setRunBudget(run.id, deps.runBudgetNanoUsd);
+  // Apply the configured per-run budget ceiling at the one place a run is born. Subscription
+  // installations get their own, looser ceiling: their usage is metered in rate-limit windows
+  // rather than dollars, so the figure is only guarding against a runaway loop.
+  if (created) {
+    const onSubscription = (await store.getInstallationAuthType(installationId)) === 'subscription';
+    const budget = onSubscription
+      ? (deps.subscriptionRunBudgetNanoUsd ?? deps.runBudgetNanoUsd)
+      : deps.runBudgetNanoUsd;
+    if (budget !== undefined) await store.setRunBudget(run.id, budget);
   }
 
   if (run.state !== RunState.Received) {

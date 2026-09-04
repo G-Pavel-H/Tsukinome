@@ -11,6 +11,7 @@ import {
   type SetupResult,
 } from '../../src/web/setup-handlers.js';
 import type { GitHubOAuthClient } from '../../src/github/oauth.js';
+import { readInstallationAuth } from '../../src/llm/installation-auth.js';
 import { silentLog } from '../helpers.js';
 
 const masterKey = randomBytes(32);
@@ -34,15 +35,20 @@ describe('setup handlers', () => {
   let vault: CredentialVault;
   let sessions: SessionStore;
   let validateKey: ReturnType<typeof vi.fn>;
+  let validateSubscriptionToken: ReturnType<typeof vi.fn>;
 
-  function deps(oauth = fakeOauth()): SetupDeps {
+  function deps(over: Partial<SetupDeps> = {}): SetupDeps {
     return {
-      oauth,
+      oauth: fakeOauth(),
       validateKey,
+      validateSubscriptionToken,
+      allowSubscriptionAuth: true,
       vault,
+      store,
       sessions,
       config: { clientId: 'cid', clientSecret: 'secret', baseUrl: 'https://tsk.example.com' },
       log: silentLog,
+      ...over,
     };
   }
 
@@ -51,6 +57,7 @@ describe('setup handlers', () => {
     vault = new CredentialVault(store, masterKey);
     sessions = new SessionStore();
     validateKey = vi.fn(async () => true);
+    validateSubscriptionToken = vi.fn(async () => true);
   });
 
   describe('handleSetupStart', () => {
@@ -80,7 +87,7 @@ describe('setup handlers', () => {
     });
 
     it('rejects a user who does not manage the installation (403, no session)', async () => {
-      const d = deps(fakeOauth({ ids: [1, 2, 3] })); // user manages 1/2/3, not 42
+      const d = deps({ oauth: fakeOauth({ ids: [1, 2, 3] }) }); // user manages 1/2/3, not 42
       const state = sessions.createState(42);
       const r = await handleCallback({ code: 'code', state }, d);
       const html = assertHtml(r);
@@ -90,7 +97,7 @@ describe('setup handlers', () => {
 
     it('renders the key form + sets a session cookie for a verified manager', async () => {
       const state = sessions.createState(42);
-      const r = await handleCallback({ code: 'code', state }, deps(fakeOauth({ ids: [42, 7] })));
+      const r = await handleCallback({ code: 'code', state }, deps({ oauth: fakeOauth({ ids: [42, 7] }) }));
       const html = assertHtml(r);
       expect(html.status).toBe(200);
       expect(html.body).toContain('42'); // the installation id is embedded in the form
@@ -103,13 +110,13 @@ describe('setup handlers', () => {
   describe('handleKeySubmit', () => {
     async function verifiedSession(ids: number[] = [42]): Promise<string> {
       const state = sessions.createState(ids[0]!);
-      const r = await handleCallback({ code: 'code', state }, deps(fakeOauth({ ids })));
+      const r = await handleCallback({ code: 'code', state }, deps({ oauth: fakeOauth({ ids }) }));
       return assertHtml(r).cookie!.value;
     }
 
     it('401s without a valid session', async () => {
       const r = await handleKeySubmit(
-        { sessionId: null, installationId: 42, apiKey: 'sk-ant-x' },
+        { sessionId: null, installationId: 42, authType: 'api_key', secret: 'sk-ant-x' },
         deps(),
       );
       expect(assertHtml(r).status).toBe(401);
@@ -119,7 +126,7 @@ describe('setup handlers', () => {
     it('403s when the session does not cover the target installation', async () => {
       const sessionId = await verifiedSession([1, 2, 3]);
       const r = await handleKeySubmit(
-        { sessionId, installationId: 42, apiKey: 'sk-ant-x' },
+        { sessionId, installationId: 42, authType: 'api_key', secret: 'sk-ant-x' },
         deps(),
       );
       expect(assertHtml(r).status).toBe(403);
@@ -129,7 +136,7 @@ describe('setup handlers', () => {
 
     it('400s on an empty key', async () => {
       const sessionId = await verifiedSession([42]);
-      const r = await handleKeySubmit({ sessionId, installationId: 42, apiKey: '   ' }, deps());
+      const r = await handleKeySubmit({ sessionId, installationId: 42, authType: 'api_key', secret: '   ' }, deps());
       expect(assertHtml(r).status).toBe(400);
       expect(validateKey).not.toHaveBeenCalled();
     });
@@ -138,7 +145,7 @@ describe('setup handlers', () => {
       validateKey.mockResolvedValue(false);
       const sessionId = await verifiedSession([42]);
       const r = await handleKeySubmit(
-        { sessionId, installationId: 42, apiKey: 'sk-ant-bad' },
+        { sessionId, installationId: 42, authType: 'api_key', secret: 'sk-ant-bad' },
         deps(),
       );
       expect(assertHtml(r).status).toBe(400);
@@ -148,7 +155,7 @@ describe('setup handlers', () => {
     it('validates, encrypts, and stores a good key for a verified manager', async () => {
       const sessionId = await verifiedSession([42]);
       const r = await handleKeySubmit(
-        { sessionId, installationId: 42, apiKey: '  sk-ant-good  ' },
+        { sessionId, installationId: 42, authType: 'api_key', secret: '  sk-ant-good  ' },
         deps(),
       );
       expect(assertHtml(r).status).toBe(200);
@@ -156,10 +163,74 @@ describe('setup handlers', () => {
       expect(await vault.getAnthropicKey(42)).toBe('sk-ant-good');
     });
 
+    it('stores a Claude subscription token against the installation', async () => {
+      const sessionId = await verifiedSession([42]);
+      const r = await handleKeySubmit(
+        { sessionId, installationId: 42, authType: 'subscription', secret: '  sk-ant-oat-good  ' },
+        deps(),
+      );
+      expect(assertHtml(r).status).toBe(200);
+      expect(validateSubscriptionToken).toHaveBeenCalledWith('sk-ant-oat-good'); // trimmed
+      expect(validateKey).not.toHaveBeenCalled(); // an OAuth token is not an API key
+      expect(await readInstallationAuth(vault, store, 42)).toEqual({
+        authType: 'subscription',
+        secret: 'sk-ant-oat-good',
+      });
+    });
+
+    it('rejects a subscription token Anthropic does not recognise, storing nothing', async () => {
+      const sessionId = await verifiedSession([42]);
+      validateSubscriptionToken.mockResolvedValue(false);
+      const r = await handleKeySubmit(
+        { sessionId, installationId: 42, authType: 'subscription', secret: 'sk-ant-oat-bad' },
+        deps(),
+      );
+      expect(assertHtml(r).status).toBe(400);
+      expect(await store.getInstallationCredential(42)).toBeNull();
+    });
+
+    it('refuses the subscription option when the deployment has it switched off', async () => {
+      const sessionId = await verifiedSession([42]);
+      const r = await handleKeySubmit(
+        { sessionId, installationId: 42, authType: 'subscription', secret: 'sk-ant-oat-good' },
+        deps({ allowSubscriptionAuth: false }),
+      );
+      expect(assertHtml(r).status).toBe(400);
+      expect(validateSubscriptionToken).not.toHaveBeenCalled();
+      // Nothing stored — better than accepting a credential every run would then refuse.
+      expect(await store.getInstallationCredential(42)).toBeNull();
+    });
+
+    it('lets an installation switch from an API key to a subscription', async () => {
+      const sessionId = await verifiedSession([42]);
+      await handleKeySubmit(
+        { sessionId, installationId: 42, authType: 'api_key', secret: 'sk-ant-key' },
+        deps(),
+      );
+      await handleKeySubmit(
+        { sessionId, installationId: 42, authType: 'subscription', secret: 'sk-ant-oat' },
+        deps(),
+      );
+      expect(await readInstallationAuth(vault, store, 42)).toEqual({
+        authType: 'subscription',
+        secret: 'sk-ant-oat',
+      });
+    });
+
+    it('rejects an unknown auth type rather than guessing', async () => {
+      const sessionId = await verifiedSession([42]);
+      const r = await handleKeySubmit(
+        { sessionId, installationId: 42, authType: 'magic' as 'api_key', secret: 'x' },
+        deps(),
+      );
+      expect(assertHtml(r).status).toBe(400);
+      expect(await store.getInstallationCredential(42)).toBeNull();
+    });
+
     it('rotates an existing key on a repeat submit', async () => {
       const sessionId = await verifiedSession([42]);
-      await handleKeySubmit({ sessionId, installationId: 42, apiKey: 'sk-ant-old' }, deps());
-      await handleKeySubmit({ sessionId, installationId: 42, apiKey: 'sk-ant-new' }, deps());
+      await handleKeySubmit({ sessionId, installationId: 42, authType: 'api_key', secret: 'sk-ant-old' }, deps());
+      await handleKeySubmit({ sessionId, installationId: 42, authType: 'api_key', secret: 'sk-ant-new' }, deps());
       expect(await vault.getAnthropicKey(42)).toBe('sk-ant-new');
     });
   });

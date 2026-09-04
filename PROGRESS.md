@@ -1,6 +1,8 @@
-# Tsukinome — progress log
+# Tsukinome — progress log (through GA)
 
-Keep this current. It's the source of truth for what's done and what's next.
+> **Frozen.** This file is the historical record up to and including Phase 2.1 (subscription auth).
+> Post-GA work is tracked in **[`PROGRESS-POST-GA.md`](PROGRESS-POST-GA.md)** — including the
+> outstanding issues below, which were carried forward rather than left here.
 
 ## Phase status
 
@@ -23,6 +25,7 @@ Keep this current. It's the source of truth for what's done and what's next.
 - [x] Phase 13b — first non-TS language pack (Python)  ← live Python run still to verify
 - [x] Phase 14 — Lightweight local embeddings (ONNX via fastembed; torch dropped)  ← gated index run still to verify on a host
 - [x] Phase 15 — Bootstrap a test setup when the repo has none  ← live bootstrap run still to verify
+- [x] Phase 2.1 — Subscription auth alongside BYO API key, offered on the connect page  ← live subscription run still to verify
 
 ## Outstanding issues (revisit before calling go-live done)
 
@@ -32,6 +35,20 @@ Keep this current. It's the source of truth for what's done and what's next.
   storing its own key and a run billing to it, and **two installations with different keys running
   concurrently without cross-tenant leakage** (the phase's headline exit criterion). Both need a
   public `SETUP_BASE_URL` — i.e. a deployed host — since a real user's browser can't reach localhost.
+- **⏸️ Subscription auth: live run + memory envelope still unverified (Phase 2.1).** Code-complete
+  and CI-green, and users can now choose "my Claude subscription" on the connect page. Two things
+  remain unproven: a real issue → PR run billed to a subscription, and the memory envelope on
+  Render — the Agent SDK spawns its bundled Claude Code binary per model call, and the CocoIndex
+  sidecar already spikes ~300MB on a 512MB Starter.
+  **Policy note, corrected 2026-09-03.** An earlier entry here read Anthropic's restriction too
+  broadly. Their support article *Use the Claude Agent SDK with your Claude plan* lists "third-party
+  apps that authenticate with your Claude subscription through the Agent SDK" as covered by the
+  user's plan — which is exactly what our paste-a-`setup-token` flow does. What still needs prior
+  approval is *hosting a claude.ai login button* (an OAuth redirect), and that is separately
+  blocked by there being no public OAuth client id for third parties. So the connect page offers a
+  token paste, not a "Sign in with Claude" button, and that is a deliberate design point rather
+  than a temporary gap.
+
 - **⏸️ Non-recoverable transient state (reliability).** A non-budget exception thrown *after* the
   `Planning`/`Implementing` transition can't self-recover — the retry is skipped by the
   `state !== <expected>` guard, stranding the run in the transient state. Harden it (reset-to-prior-state
@@ -102,7 +119,7 @@ the run sat in `implementing` forever.
 **Known limitation, deliberately not fixed.** `detectToolchain` on a repo with *both* manifests
 returns the first registry match (TS/JS) — that is registry order, not judgement. A principled
 answer would consider which directory the change actually touches. Manifest-first still beats
-byte-count, and `.tsukinome/config.yml` (Phase 2.1) is the real fix.
+byte-count, and `.tsukinome/config.yml` (Phase 2.2) is the real fix.
 
 **Related Phase 15 exposure (unchanged, worth knowing).** The test-setup bootstrap's green gate
 proves the runner *works*, not that it is the *right ecosystem*. Before this fix, a mis-detected
@@ -670,6 +687,8 @@ successful run once the blocker is resolved. Per-call audit remains in `llm_call
 
 (Append a line per phase: date, phase, outcome, demo.)
 
+- 2026-09-03 | Phase 2.1 (finish) | ✅ Complete | 372 tests pass (24 gated-skipped), typecheck + lint clean. Closed the gap that made Phase 2.1 unreachable for users: the connect page now *offers* the subscription, rather than the credential only arriving via `debug:set-auth`. `renderCredentialForm` leads with **"Use my Claude subscription"** and spells out how to get a token in five steps; an Anthropic API key is the pay-as-you-go alternative. The chosen credential is validated on the path it will actually run on — an OAuth token can't be checked against the Messages API, so `subscriptionTokenValidator` makes one minimal Agent SDK call — then stored with its auth type. With `ALLOW_SUBSCRIPTION_AUTH` off, the option is refused at the form rather than stored, since accepting a credential every run would then reject is the worse failure. Also: pages restyled to tsukinome.io's tokens (#06070f ground, #0d1022 panels, cyan→violet→magenta gradient, Space Grotesk over Inter) with assets kept inlined — a page that takes a credential shouldn't add a third party to its trust boundary; and the connect page's re-visitability is now documented on the page itself and in a README section, so switching method or rotating a credential needs no reinstall. Demo: `npx vitest run test/web` — a subscription token is stored with `authType: 'subscription'`, a rejected token stores nothing, the flag-off path refuses without storing, and an installation can switch key → subscription. Next: reinstall the dev App and click the real flow end to end.
+- 2026-09-02 | Phase 2.1 | ✅ Complete (code + CI; live subscription run pending, and third-party use pending Anthropic approval) | 367 tests pass (24 gated-skipped), typecheck + lint clean. An installation can now authenticate with a **Claude Pro/Max subscription** instead of an API key, behind `ALLOW_SUBSCRIPTION_AUTH` (default off). Built `AgentSdkProvider` behind the existing `LlmProvider` seam — one single-turn, tool-free, JSON-schema call through the Claude Agent SDK — plus an `auth_type` discriminator on `installation_credentials` (migration 010), a resolver that branches on it, and `SubscriptionRateLimitError` as the subscription-side parallel of `BudgetExhaustedError` (terminal refusal, comment says when the plan resets). Gateway, budget, cost logging, agent runner, roles and pipeline are untouched: cost stays notional, priced from the SDK's reported tokens, so `llm_calls` rows remain comparable across both auth types. The harness runs sealed shut (`allowedTools: []`, `settingSources: []`, `maxTurns: 1`) — issue text reaches it as data and must never reach a tool. Demo: `npx vitest run test/llm/agent-sdk-provider.test.ts test/llm/installation-auth.test.ts test/llm/provider-resolver.test.ts test/worker/rate-limited.test.ts` — structured output round-trips as JSON text, tokens map to `Usage`, a rejected plan refuses terminally with a reset time, and flipping the flag off sends subscription installations back to the key path with no data migration. Next: `npm run debug:set-auth -- <id> subscription <token>` against the dev App and a real issue → PR run.
 - 2026-08-02 | Fix | ✅ Complete | 339 tests pass (24 gated-skipped), typecheck + lint clean. The stale sweep no longer retries an unreachable installation forever: a 404 from the installation-token mint (or a deleted issue/repo) now closes the run as `Aborted` instead of being re-selected every hour with the state change forever skipped. Transient errors still retry. Demo: `npx vitest run test/worker/stale.test.ts` — a 404 closes the run and a later sweep does not touch it, a 500 leaves it parked, and one unreachable run does not stop the sweep reaching the others.
 - 2026-08-01 | Fix | ✅ Complete | 335 tests pass (24 gated-skipped), typecheck + lint clean. Post-Phase-15 incident fix — see the Incident log. Toolchain resolution is now **manifest-first** (`getRepoRootFiles` → `detectToolchain` → `toolchainForLanguage`), a failed sandbox clone/install raises `SandboxSetupError` and is **terminal, not retried**, and a dead-lettered job now closes its run so nothing is stranded in a transient state. Demo: `npx vitest run test/worker/handle-produce-spec.test.ts test/worker/worker.test.ts` — an Angular repo whose primary language is Python resolves to TS/JS, a repo supported by manifest but not language is accepted, both signals empty still refuses, a sandbox setup failure refuses once with no retry, and a dead-letter leaves the run `failed`.
 - 2026-08-01 | Phase 15 | ✅ Complete (code + CI; live bootstrap run pending a host) | 328 tests pass (24 gated-skipped), typecheck + lint clean. Tsukinome now works on repos with **no test setup**: detect deterministically at plan time (`src/pipeline/test-setup.ts`), disclose + consent at the existing plan gate, then scaffold and **verify green before committing** it as its own commit (`src/pipeline/bootstrap.ts`), via a new optional `Toolchain.bootstrap` recipe (vitest for TS/JS, pytest for Python) and a narrow `CodeSandbox.runSetup`. No new run states or job types; repos that already have tests take no new path. Also relaxed `npm ci` → `npm ci || npm install` (it threw on a missing lockfile at sandbox open, before anything could recover). Demo: `npx vitest run test/toolchain/bootstrap.test.ts test/pipeline/test-setup.test.ts test/pipeline/bootstrap.test.ts test/worker/handle-implement.test.ts test/worker/handle-produce-plan.test.ts` — a bare repo gets a vitest/pytest setup committed before the feature work, a repo with tests is untouched, a not-green bootstrap commits nothing and stops gracefully, and a pack with no recipe refuses before the Opus plan call. Next: verify live on a zero-test TS repo and a zero-test Python repo (needs the multi-toolchain E2B image).
