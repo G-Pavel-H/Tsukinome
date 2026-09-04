@@ -555,7 +555,108 @@ and the memory envelope on Render.
 
 **Open questions (narrowed):** does **prompt caching** still pay off through the SDK path, given we lose our own breakpoints (measure `cache_read` equivalents, if the SDK reports them); how to **capture and refresh** a subscription token for a hosted service (interactive OAuth vs a pasted `setup-token`, and its expiry/rotation); do **Team/Enterprise** subscriptions behave differently from Pro/Max; how to gate **model tiers** against plan tier (Opus needs Max); and what the memory envelope actually is on Render with a spawned binary per call.
 
-### Phase 2.2 — Declared toolchain (optional `.tsukinome/config.yml`) — cheap path to more languages
+### Phase 2.2 — OpenRouter compatibility (bring any model, alongside Claude)
+
+**The aim.** Today every model call is Claude, chosen by us: `src/llm/models.ts` pins Haiku for
+triage, Sonnet for implementation, Opus for spec/plan/review. That is a good default and a hard
+requirement — a user without an Anthropic account or subscription cannot use Tsukinome at all, and
+a user who wants to run a free or open-weight model has no way to. Add **OpenRouter as a second
+provider alongside Claude**, so an installation can supply an OpenRouter key and run the pipeline
+on whatever model they choose.
+
+**The shape of the decision we've already made.** The obvious design question is whether users pick
+a model *per stage* (mirroring our tiers) or *one model for everything*. **One model for
+everything.** Per-stage configuration is more powerful and much worse: it is a wall of choices at
+setup time, it invites incoherent combinations, and it multiplies the support surface. A single
+"which model?" field is something a user can answer in five seconds. The tier abstraction stays in
+the code — roles keep asking for `triage`/`implementation`/`review` — but on an OpenRouter
+installation all three resolve to the one model the user named.
+
+**Where it fits the existing seams.** This is the third provider behind `LlmProvider`, after
+`AnthropicProvider` and `AgentSdkProvider`, resolved per-installation by `buildProviderResolver`
+exactly as the other two are. The credential is another row in the same vault with another
+`auth_type`. The connect page grows a third option. Nothing above the provider seam should need to
+know.
+
+**What to think hard about (not yet decided):**
+- **Weaker models will fail differently.** The pipeline leans on schema-constrained structured
+  output at every stage. Many OpenRouter models are poor at it, or don't support it at all. Decide
+  what the floor is: refuse models that can't do structured output, fall back to prompt-and-parse,
+  or let the run fail with a clear message naming the model as the cause.
+- **Cost accounting.** `pricing.ts` knows Anthropic's rates. OpenRouter publishes per-model pricing
+  and returns generation cost — decide whether to read theirs or keep a table.
+- **Set expectations honestly.** A free model will produce worse specs, worse plans and worse code.
+  The product should say so at the point of choosing, not let users conclude Tsukinome is bad.
+- **Which model is the default suggestion,** and whether we validate the user's choice against a
+  known-good list at setup time.
+
+**Rough exit criteria:** an installation can connect an OpenRouter key and a model name, and a full
+issue → PR run completes on it; the Claude paths are byte-for-byte unchanged; cost is recorded for
+OpenRouter runs too; a model that can't satisfy the pipeline fails with a message that names the
+model rather than looking like a Tsukinome bug.
+
+### Phase 2.3 — Label-gated pickup, and a label for ungated runs
+
+**The aim.** Tsukinome currently starts work on **every** issue opened on a connected repo. That is
+the wrong default for a real repository: most issues are not work for an agent, and an agent that
+begins drafting a spec on a bug report nobody asked it to touch is noise at best. Gate pickup
+behind a **label** — no label, no run — so adopting Tsukinome on a busy repo is safe.
+
+Then the opposite lever: a **second label that skips the human gates**. Today every run stops for
+clarification and again for plan approval. For a small, well-specified issue that ceremony is
+heavier than the task. A "let it run" label should take the issue straight through to a PR without
+parking, for people who would rather review the PR than the plan.
+
+**What to think hard about (not yet decided):**
+- **Label names**, and whether they're configurable or fixed. Fixed is simpler and discoverable;
+  configurable needs the Phase 2.5 config file.
+- **Labelling an existing issue** should probably start a run — the trigger is the label, not the
+  issue being new.
+- **The ungated path still needs a floor.** Budget, fix-round cap and the refusal paths must all
+  still apply; "skip the gates" means skip *waiting for a human*, not skip the safety rails.
+- **What happens at a gate that would have asked a question.** If the clarifier has real questions
+  and nobody will answer, does the run proceed on assumptions and state them in the PR, or stop?
+  Proceeding-with-stated-assumptions is probably right, and needs the spec to record them.
+
+**Rough exit criteria:** an unlabelled issue is ignored entirely (no comment, no run, no spend); a
+labelled one runs as today; the ungated label produces a PR with no human turn in between, with
+assumptions recorded; both labels are documented in the README.
+
+### Phase 2.4 — Operating cost and run lifecycle
+
+**The aim.** Running Tsukinome costs more than it should, in ways that have nothing to do with
+model spend.
+
+**The Neon problem, diagnosed 2026-09-04.** 100 free compute units disappeared quickly and the
+cause is in our code, not Neon's billing: **the worker polls the `jobs` table every second**
+(`DEFAULT_POLL_INTERVAL_MS = 1000` in `src/worker/worker.ts`), forever, whether or not there is any
+work. Neon bills by compute *active time* and only suspends an endpoint after a few minutes with no
+queries — so a query every second means the endpoint **never** scales to zero and we are billed
+around the clock for an idle system. The hourly stale sweep would keep it awake on its own too.
+Fixing this is mostly about not touching the database when there's nothing to do: back off the poll
+when the queue is empty, or move to `LISTEN`/`NOTIFY` so an enqueue wakes the worker instead of the
+worker asking. Either way the target is an idle deployment that lets Neon suspend.
+
+**The listening-window problem.** A parked run currently waits **3 days** before a reminder and
+**7 days** before closing (`PING_AFTER_MS` / `CLOSE_AFTER_MS` in `src/worker/stale.ts`). That is far
+too long: it holds state, keeps rows live, and means a forgotten issue lingers for a week. Bring it
+down to roughly **24 hours**, and apply the same thinking after a PR is opened — Tsukinome should
+respond to review comments for about a day, then stop listening rather than staying attached
+indefinitely.
+
+**What to think hard about (not yet decided):**
+- **Whether 24 hours is right for every gate.** Waiting on a clarification reply and waiting on a
+  PR review are different human rhythms; a single number may not fit both.
+- **How a run ends politely.** Closing should leave a comment saying how to restart, not vanish.
+- **Whether idle cost is a Neon problem or an architecture problem.** If the worker can be made to
+  sleep properly, Neon's free tier is fine; if not, that's an argument about where state lives.
+- Measure before and after — the point is a bill that drops, not a cleaner-looking loop.
+
+**Rough exit criteria:** an idle deployment lets the database endpoint suspend, demonstrated by
+Neon's own compute metrics; parked runs ping and close on the shorter windows; a closed run leaves
+a comment explaining how to restart; no change to how an active run behaves.
+
+### Phase 2.5 — Declared toolchain (optional `.tsukinome/config.yml`) — cheap path to more languages
 
 **The problem we're solving:** After Phase 13, adding each new language (Java/Maven-or-Gradle, C#/dotnet, Go, Rust…) means building and maintaining a full **auto-detecting** language pack — heuristics for that ecosystem's manifests, install/test commands, test conventions, and edge cases. That's real per-language overhead, and detection is exactly where the ambiguity lives (Maven vs Gradle, monorepos, non-standard test scripts). We want a way to support more languages **without** writing bespoke detection for each — and to let any repo remove the guessing entirely when it wants to.
 
@@ -579,3 +680,32 @@ and the memory envelope on Render.
 **Rough exit criteria:** a repo with a valid `.tsukinome/config.yml` runs issue → test-first PR using the declared commands, with no auto-detection involved; a repo without the file behaves exactly as Phase 13 (detection default); a malformed config produces a clear refusal comment, not a crash; declared commands run only in the sandbox.
 
 **Open questions (to review with Claude Code CLI):** file format (YAML vs TOML vs JSON); how much a declared config alone can enable a language with no pack (generic runtime vs known-runtime-only); monorepo / per-directory or per-package configs; precedence when both a config file *and* a detectable pack exist (config wins — confirm); whether to also allow declaring the `build` step and lint for richer verification.
+
+### Phase 2.6 — Bring-your-own and pooled infrastructure keys (E2B, Neon)
+
+**The aim.** Model spend is already the user's (Phase 12 and 2.1). Everything *else* is still the
+operator's: one E2B key runs every sandbox, one Neon database holds every installation's state. That
+is the remaining thing that doesn't scale — a single E2B key is a single rate limit and a single
+bill, and one database is one blast radius.
+
+Two related moves. First, **more than one operator key**: pool E2B (and Neon, if it stays
+operator-owned) so load spreads across keys rather than piling onto one. Second, **let users bring
+their own**, the same way they bring their own model credential — an installation supplying its own
+E2B key runs its sandboxes on its own account, and the same for its own database if it wants its
+state isolated.
+
+**What to think hard about (not yet decided):**
+- **These two are different problems.** Pooling is an operator capacity concern; BYO is a tenancy
+  and trust concern. They may want to be separate phases once the shape is clearer.
+- **A user-supplied Neon database is a much bigger step than a user-supplied E2B key** — it means
+  running migrations against a database we don't control, and it changes where a run's state lives.
+  Consider whether that is genuinely wanted or whether isolation within our database is enough.
+- **Failure modes get user-visible.** A bad or exhausted user E2B key must produce a clear refusal,
+  the way a missing model credential already does — not a cryptic sandbox error.
+- **The vault already holds per-installation secrets** and the connect page already chooses between
+  credential types, so both extend rather than needing new machinery.
+
+**Rough exit criteria:** operator keys can be pooled and a single key's exhaustion doesn't stop the
+service; an installation can supply its own E2B key and its runs use it; a bad user-supplied key
+refuses gracefully with guidance; the operator-owned path still works untouched for installations
+that supply nothing.

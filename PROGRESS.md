@@ -1,6 +1,8 @@
-# Tsukinome — progress log
+# Tsukinome — progress log (through GA)
 
-Keep this current. It's the source of truth for what's done and what's next.
+> **Frozen.** This file is the historical record up to and including Phase 2.1 (subscription auth).
+> Post-GA work is tracked in **[`PROGRESS-POST-GA.md`](PROGRESS-POST-GA.md)** — including the
+> outstanding issues below, which were carried forward rather than left here.
 
 ## Phase status
 
