@@ -37,6 +37,10 @@ class E2BSandboxHandle implements SandboxHandle {
     }
   }
 
+  async extendTimeout(timeoutMs: number): Promise<void> {
+    await this.sandbox.setTimeout(timeoutMs);
+  }
+
   async kill(): Promise<void> {
     await this.sandbox.kill();
   }

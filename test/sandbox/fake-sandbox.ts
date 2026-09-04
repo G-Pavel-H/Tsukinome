@@ -21,6 +21,7 @@ let handleSeq = 0;
 export class FakeSandboxHandle implements SandboxHandle {
   readonly id = `fake-sbx-${++handleSeq}`;
   readonly commands: { cmd: string; opts?: RunCommandOptions }[] = [];
+  readonly timeoutExtensions: number[] = [];
   killed = 0;
 
   constructor(private readonly scripts: ScriptedCommand[]) {}
@@ -31,6 +32,10 @@ export class FakeSandboxHandle implements SandboxHandle {
     if (!script) return ok; // unmatched commands succeed by default
     if (script.throwError) throw new Error(script.throwError);
     return script.result ?? ok;
+  }
+
+  async extendTimeout(timeoutMs: number): Promise<void> {
+    this.timeoutExtensions.push(timeoutMs);
   }
 
   async kill(): Promise<void> {
